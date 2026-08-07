@@ -22,7 +22,9 @@ mechdog_navigation_ros/
 ├── package.xml            # ROS2 包描述 (Jazzy 默认; Humble 改 ROS_DISTRO 即可)
 ├── CMakeLists.txt         # ament_cmake, 子目录引用 ../mechdog_navigation 算法库
 ├── msg/FusionResult.msg   # 参考: 融合结果字段定义 (当前以 JSON 字符串发布, 未启用 rosidl)
-├── src/safety_node.cpp    # 主节点
+├── src/safety_node.cpp    # 主节点: 融合+规划 -> /cmd_vel + /fusion_result
+├── src/chassis_bridge.hpp # 底盘通信抽象: ChassisBridge 接口 + 模拟/STM32 实现
+├── src/chassis_bridge_node.cpp  # 底盘桥接节点: 订阅 /cmd_vel -> 发送到底盘
 ├── launch/safety.launch.py
 └── config/safety_params.yaml
 ```
@@ -54,11 +56,14 @@ ros2 launch mechdog_navigation_ros safety.launch.py use_simulated:=false
 
 | 话题 | 类型 | 方向 | 说明 |
 |---|---|---|---|
-| `/cmd_vel` | geometry_msgs/Twist | 发布 | 最终速度指令（本节点可覆盖 Nav2 输出） |
+| `/cmd_vel` | geometry_msgs/Twist | 发布 | safety_node 产出的最终速度指令 |
+| `/cmd_vel` | geometry_msgs/Twist | 订阅 | chassis_bridge_node 消费, 发送到底盘 |
 | `/fusion_result` | std_msgs/String (JSON) | 发布 | 融合结果 JSON（环境/悬崖/前方距离/动作/权重/速度） |
 | `/scan` | sensor_msgs/LaserScan | 订阅 | 师兄雷达（当前缓存预留，不参与融合） |
 
 ## 对接注意
+
+- **底盘通信**：`chassis_bridge_node` 订阅 `/cmd_vel`，通过 `ChassisBridge` 接口发送到底盘。默认 `bridge_type:=simulated`（日志打印，PC 可跑通链路）；真机改为 `bridge_type:=stm32`（`Stm32ChassisBridge` 待确认 2×STM32 通信方式后实现）。换实现只改 launch 参数，节点代码零改动。
 
 - **ROS2 版本**：本包按 Jazzy（Ubuntu 24.04）写法；若师兄环境是 Humble（22.04），代码无需改，仅构建环境不同。
 - **速度仲裁**：当前 safety_node 直接发布自己的规划结果。接入 Nav2 后，建议将 Nav2 的 `/cmd_vel` 作为输入，仅当本层检测到悬崖/近距障碍时覆盖输出（对应 `determine_action()` 悬崖最高优先级逻辑）。
@@ -68,7 +73,8 @@ ros2 launch mechdog_navigation_ros safety.launch.py use_simulated:=false
 ## 状态
 
 - [x] 包骨架 + safety_node 模拟模式
+- [x] 底盘通信层骨架（ChassisBridge 接口 + 模拟实现，chassis_bridge_node）
 - [ ] ROS2 版本确认（回学校后）
 - [ ] 真机传感器节点（Astra OpenNI2 / HC-SR04 libgpiod）
-- [ ] 底盘通信层（2×STM32）
+- [ ] Stm32ChassisBridge 实现（待确认 2×STM32 通信方式）
 - [ ] Nav2 速度仲裁接入

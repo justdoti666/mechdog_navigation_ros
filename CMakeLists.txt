@@ -56,6 +56,21 @@ install(TARGETS safety_node
   DESTINATION lib/${PROJECT_NAME}
 )
 
+# 底盘通信节点: 订阅 /cmd_vel -> ChassisBridge (simulated/stm32)
+add_executable(chassis_bridge_node src/chassis_bridge_node.cpp)
+target_include_directories(chassis_bridge_node PRIVATE
+  ${CMAKE_CURRENT_SOURCE_DIR}
+)
+target_link_libraries(chassis_bridge_node
+  rclcpp::rclcpp
+  geometry_msgs::geometry_msgs
+)
+target_compile_features(chassis_bridge_node PRIVATE cxx_std_17)
+
+install(TARGETS safety_node chassis_bridge_node
+  DESTINATION lib/${PROJECT_NAME}
+)
+
 install(DIRECTORY launch
   DESTINATION share/${PROJECT_NAME}
 )
