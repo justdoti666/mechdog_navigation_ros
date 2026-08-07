@@ -1,0 +1,24 @@
+<?xml version="1.0"?>
+<?xml-model href="http://download.ros.org/schema/package_format3.xsd" schematypens="http://www.w3.org/2001/XMLSchema"?>
+<package format="3">
+  <name>mechdog_navigation_ros</name>
+  <version>0.1.0</version>
+  <description>mechdog_navigation 纯算法库的 ROS2 胶水包：局部安全层（Astra 深度相机 + HC-SR04 超声波 + 环境光强判定）融合与速度仲裁</description>
+  <maintainer email="justdoti666@users.noreply.github.com">justdoti666</maintainer>
+  <license>MIT</license>
+
+  <!-- 依赖的纯算法库：以子目录方式引用 mechdog_navigation 源码，不单独发布 -->
+  <buildtool_depend>ament_cmake</buildtool_depend>
+
+  <depend>rclcpp</depend>
+  <depend>std_msgs</depend>
+  <depend>geometry_msgs</depend>
+  <depend>sensor_msgs</depend>
+
+  <exec_depend>launch</exec_depend>
+  <exec_depend>launch_ros</exec_depend>
+
+  <export>
+    <build_type>ament_cmake</build_type>
+  </export>
+</package>

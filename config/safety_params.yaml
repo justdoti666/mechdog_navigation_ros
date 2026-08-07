@@ -1,0 +1,5 @@
+# safety_node 参数 (YAML)
+safety_node:
+  ros__parameters:
+    # true=模拟模式(无需硬件, PC 可跑), false=真机模式
+    use_simulated: true
