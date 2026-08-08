@@ -26,7 +26,9 @@
 
 #include <winsock2.h>
 #include <ws2tcpip.h>
+#include <gdiplus.h>
 #pragma comment(lib, "ws2_32.lib")
+#pragma comment(lib, "gdiplus.lib")
 
 #include <astra/astra.hpp>
 
@@ -55,6 +57,47 @@ static bool encode_jpeg(const uint8_t* rgb, int w, int h, JpegBuffer& out) {
     return ok != 0 && out.size > 0;
 }
 
+// 计算深度图中央区域的平均距离 (mm) 和最近障碍距离 (mm)
+// 中央 1/4 区域, avg<0 表示无效; min 返回该区域最近有效值
+static double central_depth_mm(const int16_t* depth, int w, int h,
+                               double* min_mm_out) {
+    int x0 = w / 4, x1 = w * 3 / 4;
+    int y0 = h / 4, y1 = h * 3 / 4;
+    double sum = 0;
+    int count = 0;
+    double min_mm = 1e9;
+    for (int y = y0; y < y1; ++y) {
+        for (int x = x0; x < x1; ++x) {
+            int16_t v = depth[y * w + x];
+            if (v > 0 && v < 8000) {  // 有效范围 0~8m
+                sum += v;
+                ++count;
+                if (v < min_mm) min_mm = v;
+            }
+        }
+    }
+    if (min_mm_out) *min_mm_out = (count > 0) ? min_mm : -1.0;
+    return count > 0 ? sum / count : -1.0;
+}
+
+// ============ GDI+ 文字叠加 (Windows 系统字体, 清晰可靠) ============
+// 在 RGB 缓冲上绘制文字: 创建 GDI+ Bitmap -> Graphics -> DrawString
+static void draw_text_gdiplus(uint8_t* rgb, int w, int h,
+                              const char* text, int x, int y, int font_size,
+                              uint8_t cr = 255, uint8_t cg = 40, uint8_t cb = 40) {
+    // 用 GDI+ 从 RGB 缓冲创建位图并画字 (每次调用较慢, 但叠加距离每帧一次可接受)
+    // 注意: 需在 main 中 GdiplusStartup 初始化
+    Gdiplus::Bitmap bmp(w, h, w * 3, PixelFormat24bppRGB, rgb);
+    Gdiplus::Graphics g(&bmp);
+    g.SetTextRenderingHint(Gdiplus::TextRenderingHintAntiAlias);
+    Gdiplus::SolidBrush brush(Gdiplus::Color(255, cr, cg, cb));  // ARGB
+    Gdiplus::Font font(L"Arial", (Gdiplus::REAL)font_size, Gdiplus::FontStyleBold);
+    std::wstring wtext(text, text + strlen(text));
+    Gdiplus::PointF origin((Gdiplus::REAL)x, (Gdiplus::REAL)y);
+    g.DrawString(wtext.c_str(), (INT)wtext.size(), &font, origin, &brush);
+    // Bitmap 析构时会将像素写回 rgb (因为是内存映射)
+}
+
 // ============ 极简 HTTP MJPEG 服务器 ============
 static std::atomic<bool> g_running{true};
 
@@ -80,13 +123,16 @@ static void handle_stream(SOCKET client, astra::StreamReader& reader) {
     send_all(client, header, (int)strlen(header));
 
     auto colorStream = reader.stream<astra::ColorStream>();
+    auto depthStream = reader.stream<astra::DepthStream>();
     const int width = 640, height = 480;
     std::vector<uint8_t> rgb(width * height * 3);
+    std::vector<int16_t> depth_buf(width * height);
 
     while (g_running) {
         astra_update();
         astra::Frame frame = reader.get_latest_frame();
         astra::ColorFrame color = frame.get<astra::ColorFrame>();
+        astra::DepthFrame depth = frame.get<astra::DepthFrame>();
         if (color.is_valid() && color.width() > 0) {
             // RGB888 -> 直接拷到 rgb 缓冲 (RgbPixel 是 {r,g,b} 紧凑排列)
             int len = color.width() * color.height();
@@ -95,6 +141,25 @@ static void handle_stream(SOCKET client, astra::StreamReader& reader) {
             } else {
                 std::this_thread::sleep_for(std::chrono::milliseconds(30));
                 continue;
+            }
+
+            // 深度: 中央区域平均距离 + 最近障碍 (mm), 叠加到 RGB 画面
+            double dist_mm = -1.0, min_mm = -1.0;
+            if (depth.is_valid() && depth.width() == width) {
+                depth.copy_to(depth_buf.data());
+                dist_mm = central_depth_mm(depth_buf.data(), width, height, &min_mm);
+            }
+
+            if (dist_mm >= 0) {
+                char text[40];
+                // 主: 中央平均距离 (字号 18, 红)
+                snprintf(text, sizeof(text), "DIST %.2fm", dist_mm / 1000.0);
+                draw_text_gdiplus(rgb.data(), width, height, text, 10, 10, 18);
+                // 副: 最近障碍 (字号 13, 黄), 第二行
+                if (min_mm >= 0) {
+                    snprintf(text, sizeof(text), "NEAR %.2fm", min_mm / 1000.0);
+                    draw_text_gdiplus(rgb.data(), width, height, text, 10, 34, 13, 255, 200, 0);
+                }
             }
 
             JpegBuffer jpeg;
@@ -144,7 +209,14 @@ int main(int argc, char** argv) {
     astra::StreamReader reader = streamSet.create_reader();
     auto colorStream = reader.stream<astra::ColorStream>();
     colorStream.start();
-    std::cout << "[RGB] Astra 彩色流已启动, 端口 " << port << std::endl;
+    auto depthStream = reader.stream<astra::DepthStream>();
+    depthStream.start();
+    std::cout << "[RGB] Astra 彩色流+深度流已启动, 端口 " << port << std::endl;
+
+    // 初始化 GDI+ (文字叠加)
+    Gdiplus::GdiplusStartupInput gdiplusStartupInput;
+    ULONG_PTR gdiplusToken = 0;
+    Gdiplus::GdiplusStartup(&gdiplusToken, &gdiplusStartupInput, nullptr);
 
     // 初始化 Winsock
     WSADATA wsa;

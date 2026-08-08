@@ -23,7 +23,7 @@ mechdog_navigation_ros/
 ├── CMakeLists.txt         # ament_cmake, 子目录引用 ../mechdog_navigation 算法库
 ├── msg/FusionResult.msg   # 参考: 融合结果字段定义 (当前以 JSON 字符串发布, 未启用 rosidl)
 ├── src/safety_node.cpp    # 主节点: 融合+规划 -> /cmd_vel + /fusion_result
-├── src/rgb_stream.cpp     # RGB 回传: Astra ColorStream -> MJPEG -> 浏览器查看
+├── src/rgb_stream.cpp     # RGB 回传+深度叠加: Astra ColorStream -> MJPEG, 画面叠加 DIST(中央平均)/NEAR(最近障碍)
 ├── src/stb_image_write.h  # 单头文件 JPEG 编码库 (RGB 回传依赖)
 ├── src/chassis_bridge.hpp # 底盘通信抽象: ChassisBridge 接口 + 模拟/STM32 实现
 ├── src/chassis_bridge_node.cpp  # 底盘桥接节点: 订阅 /cmd_vel -> 发送到底盘
