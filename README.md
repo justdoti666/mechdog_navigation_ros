@@ -5,7 +5,7 @@
 ## 架构
 
 ```
-师兄全局层 (Nav2)              本包 (局部安全层)
+全局层 (Nav2)              本包 (局部安全层)
   /scan (雷达) ──────────────► safety_node
   /cmd_vel (Nav2 输出) ──────► (仲裁输入, 预留)
                                  │  SensorFusion.fuse()
