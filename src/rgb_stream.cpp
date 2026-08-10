@@ -23,6 +23,7 @@
 #include <thread>
 #include <chrono>
 #include <atomic>
+#include <mutex>
 
 #include <winsock2.h>
 #include <ws2tcpip.h>
@@ -101,6 +102,47 @@ static void draw_text_gdiplus(uint8_t* rgb, int w, int h,
 // ============ 极简 HTTP MJPEG 服务器 ============
 static std::atomic<bool> g_running{true};
 
+// 全局互斥锁: 保护 StreamReader 的 open_frame/close_frame (多连接线程共享 reader)
+static std::mutex g_frame_mutex;
+
+// 读取一帧彩色+深度 (非阻塞轮询, 修复: 单次 astra_update 后新帧未必就绪)
+// 返回 true 表示成功拿到帧 (color 有效); 失败返回 false
+static bool read_frame(astra::StreamReader& reader,
+                       std::vector<uint8_t>& rgb, int w, int h,
+                       double* dist_mm_out, double* min_mm_out) {
+    std::lock_guard<std::mutex> lock(g_frame_mutex);
+
+    // 短等待重试 astra_update(), 直到 has_new_frame
+    for (int attempt = 0; attempt < 5; ++attempt) {
+        astra_update();
+        if (reader.has_new_frame()) break;
+        std::this_thread::sleep_for(std::chrono::milliseconds(2));
+    }
+    if (!reader.has_new_frame()) return false;
+
+    // timeout=0 非阻塞取帧 (默认 ASTRA_TIMEOUT_FOREVER 会永久阻塞)
+    astra::Frame frame = reader.get_latest_frame(0);
+    astra::ColorFrame color = frame.get<astra::ColorFrame>();
+    if (!color.is_valid() || color.width() <= 0) return false;
+
+    int len = color.width() * color.height();
+    if (len != w * h) return false;
+
+    color.copy_to(reinterpret_cast<astra::RgbPixel*>(rgb.data()));
+
+    // 深度: 中央区域平均距离 + 最近障碍 (mm)
+    astra::DepthFrame depth = frame.get<astra::DepthFrame>();
+    if (depth.is_valid() && depth.width() == w) {
+        std::vector<int16_t> depth_buf(w * h);
+        depth.copy_to(depth_buf.data());
+        if (dist_mm_out) *dist_mm_out = central_depth_mm(depth_buf.data(), w, h, min_mm_out);
+    } else {
+        if (dist_mm_out) *dist_mm_out = -1.0;
+        if (min_mm_out) *min_mm_out = -1.0;
+    }
+    return true;
+}
+
 // 发送完整 HTTP 响应
 static void send_all(SOCKET s, const char* data, int len) {
     int sent = 0;
@@ -126,53 +168,38 @@ static void handle_stream(SOCKET client, astra::StreamReader& reader) {
     auto depthStream = reader.stream<astra::DepthStream>();
     const int width = 640, height = 480;
     std::vector<uint8_t> rgb(width * height * 3);
-    std::vector<int16_t> depth_buf(width * height);
 
     while (g_running) {
-        astra_update();
-        astra::Frame frame = reader.get_latest_frame();
-        astra::ColorFrame color = frame.get<astra::ColorFrame>();
-        astra::DepthFrame depth = frame.get<astra::DepthFrame>();
-        if (color.is_valid() && color.width() > 0) {
-            // RGB888 -> 直接拷到 rgb 缓冲 (RgbPixel 是 {r,g,b} 紧凑排列)
-            int len = color.width() * color.height();
-            if (len == width * height) {
-                color.copy_to(reinterpret_cast<astra::RgbPixel*>(rgb.data()));
-            } else {
-                std::this_thread::sleep_for(std::chrono::milliseconds(30));
-                continue;
-            }
+        // 读取一帧 (非阻塞轮询 + 互斥锁保护)
+        double dist_mm = -1.0, min_mm = -1.0;
+        if (!read_frame(reader, rgb, width, height, &dist_mm, &min_mm)) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(5));
+            continue;
+        }
 
-            // 深度: 中央区域平均距离 + 最近障碍 (mm), 叠加到 RGB 画面
-            double dist_mm = -1.0, min_mm = -1.0;
-            if (depth.is_valid() && depth.width() == width) {
-                depth.copy_to(depth_buf.data());
-                dist_mm = central_depth_mm(depth_buf.data(), width, height, &min_mm);
+        // 深度: 中央区域平均距离 + 最近障碍 (mm), 叠加到 RGB 画面
+        if (dist_mm >= 0) {
+            char text[40];
+            // 主: 中央平均距离 (字号 18, 红)
+            snprintf(text, sizeof(text), "DIST %.2fm", dist_mm / 1000.0);
+            draw_text_gdiplus(rgb.data(), width, height, text, 10, 10, 18);
+            // 副: 最近障碍 (字号 13, 黄), 第二行
+            if (min_mm >= 0) {
+                snprintf(text, sizeof(text), "NEAR %.2fm", min_mm / 1000.0);
+                draw_text_gdiplus(rgb.data(), width, height, text, 10, 34, 13, 255, 200, 0);
             }
+        }
 
-            if (dist_mm >= 0) {
-                char text[40];
-                // 主: 中央平均距离 (字号 18, 红)
-                snprintf(text, sizeof(text), "DIST %.2fm", dist_mm / 1000.0);
-                draw_text_gdiplus(rgb.data(), width, height, text, 10, 10, 18);
-                // 副: 最近障碍 (字号 13, 黄), 第二行
-                if (min_mm >= 0) {
-                    snprintf(text, sizeof(text), "NEAR %.2fm", min_mm / 1000.0);
-                    draw_text_gdiplus(rgb.data(), width, height, text, 10, 34, 13, 255, 200, 0);
-                }
-            }
-
-            JpegBuffer jpeg;
-            if (encode_jpeg(rgb.data(), width, height, jpeg)) {
-                // 组装 MJPEG 帧
-                std::string boundary =
-                    "--frame\r\nContent-Type: image/jpeg\r\n"
-                    "Content-Length: " + std::to_string(jpeg.size) + "\r\n\r\n";
-                send_all(client, boundary.c_str(), (int)boundary.size());
-                send_all(client, (const char*)jpeg.data, jpeg.size);
-                send_all(client, "\r\n", 2);
-                free(jpeg.data);
-            }
+        JpegBuffer jpeg;
+        if (encode_jpeg(rgb.data(), width, height, jpeg)) {
+            // 组装 MJPEG 帧
+            std::string boundary =
+                "--frame\r\nContent-Type: image/jpeg\r\n"
+                "Content-Length: " + std::to_string(jpeg.size) + "\r\n\r\n";
+            send_all(client, boundary.c_str(), (int)boundary.size());
+            send_all(client, (const char*)jpeg.data, jpeg.size);
+            send_all(client, "\r\n", 2);
+            free(jpeg.data);
         }
         std::this_thread::sleep_for(std::chrono::milliseconds(30));  // ~30fps
     }
