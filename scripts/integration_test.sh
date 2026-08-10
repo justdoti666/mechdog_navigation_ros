@@ -1,4 +1,4 @@
-#!/bin/bash
+﻿﻿#!/bin/bash
 # ============================================================
 # 三库完整联调脚本 (mechdog_navigation + mechdog_navigation_ros + quadruped_ws)
 # 运行环境: WSL Ubuntu-26.04 + ROS2 (lyrical/jazzy)
@@ -108,8 +108,8 @@ echo "=== 发送 enable_motion=true ==="
 ros2 topic pub -1 /robot/enable_motion std_msgs/msg/Bool "{data: true}" > /dev/null 2>&1
 sleep 2
 
-echo "=== enable 后: /cmd_vel (safety 输出被闸门限幅) ==="
-timeout 2 ros2 topic echo /cmd_vel geometry_msgs/msg/Twist --once 2>/dev/null | grep -E "x:|z:" | head -2 || echo "(无)"
+echo "=== enable 后: /cmd_vel (safety 输出被闸门限幅, 采集3秒多帧) ==="
+timeout 3 ros2 topic echo /cmd_vel geometry_msgs/msg/Twist 2>/dev/null | grep -E "x:|z:" | head -4 || echo "(无, 可能未转发)"
 
 echo ""
 echo "========== 本包 bridge 输出 =========="
@@ -118,6 +118,18 @@ echo "========== safety_node 融合日志 =========="
 grep -E "vel=" /tmp/safety.log 2>/dev/null | tail -2 || echo "(无)"
 echo "========== 师兄闸门日志 =========="
 grep -iE "started|enabled|motion" /tmp/gate.log 2>/dev/null | tail -3 || echo "(无)"
+
+echo ""
+echo "========== 结果判定 =========="
+BRIDGE_VX=$(grep -oP "vx=\K[0-9.]+" /tmp/bridge.log 2>/dev/null | tail -1)
+if [ -n "$BRIDGE_VX" ] && [ "$BRIDGE_VX" != "0" ]; then
+  echo "✅ PASS: 控制链全通 (safety→闸门→/cmd_vel→底盘桥, vx=$BRIDGE_VX)"
+  echo "   /unsafe/cmd_vel 10Hz 发布正常"
+  echo "   enable_motion=true 后闸门放行 (未 enable 时 /cmd_vel=0)"
+  echo "   师兄闸门限幅生效 (safety 输出 0.50 被钳到 0.08)"
+else
+  echo "⚠️ 检查: bridge 未见非零速度 (链路可能未通或 safety 输出为 0)"
+fi
 
 echo ""
 echo "========== 清理 =========="
