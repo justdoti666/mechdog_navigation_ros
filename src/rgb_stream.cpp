@@ -24,6 +24,7 @@
 #include <chrono>
 #include <atomic>
 #include <mutex>
+#include <vector>
 
 #include <winsock2.h>
 #include <ws2tcpip.h>
@@ -102,6 +103,16 @@ static void draw_text_gdiplus(uint8_t* rgb, int w, int h,
 // ============ 极简 HTTP MJPEG 服务器 ============
 static std::atomic<bool> g_running{true};
 
+// 控制台 Ctrl+C / 关闭窗口: 置退出标志 (FIX-15/ROS-5)
+static BOOL WINAPI console_ctrl_handler(DWORD ctrl_type) {
+    if (ctrl_type == CTRL_C_EVENT || ctrl_type == CTRL_CLOSE_EVENT ||
+        ctrl_type == CTRL_BREAK_EVENT) {
+        g_running = false;
+        return TRUE;
+    }
+    return FALSE;
+}
+
 // 全局互斥锁: 保护 StreamReader 的 open_frame/close_frame (多连接线程共享 reader)
 static std::mutex g_frame_mutex;
 
@@ -143,14 +154,15 @@ static bool read_frame(astra::StreamReader& reader,
     return true;
 }
 
-// 发送完整 HTTP 响应
-static void send_all(SOCKET s, const char* data, int len) {
+// 发送完整 HTTP 响应; 返回实际发送字节数 (FIX-15: 调用方据此检测客户端断开)
+static int send_all(SOCKET s, const char* data, int len) {
     int sent = 0;
     while (sent < len) {
         int n = send(s, data + sent, len - sent, 0);
         if (n <= 0) break;
         sent += n;
     }
+    return sent;
 }
 
 // MJPEG 流处理器: 持续发 JPEG 帧 (multipart/x-mixed-replace)
@@ -162,7 +174,9 @@ static void handle_stream(SOCKET client, astra::StreamReader& reader) {
         "Cache-Control: no-cache\r\n"
         "Connection: close\r\n"
         "\r\n";
-    send_all(client, header, (int)strlen(header));
+    if (send_all(client, header, (int)strlen(header)) != (int)strlen(header)) {
+        return;  // 客户端已断开
+    }
 
     auto colorStream = reader.stream<astra::ColorStream>();
     auto depthStream = reader.stream<astra::DepthStream>();
@@ -196,10 +210,16 @@ static void handle_stream(SOCKET client, astra::StreamReader& reader) {
             std::string boundary =
                 "--frame\r\nContent-Type: image/jpeg\r\n"
                 "Content-Length: " + std::to_string(jpeg.size) + "\r\n\r\n";
-            send_all(client, boundary.c_str(), (int)boundary.size());
-            send_all(client, (const char*)jpeg.data, jpeg.size);
-            send_all(client, "\r\n", 2);
+            int sent_boundary = send_all(client, boundary.c_str(), (int)boundary.size());
+            int sent_jpeg = (sent_boundary == (int)boundary.size())
+                ? send_all(client, (const char*)jpeg.data, jpeg.size) : 0;
+            if (sent_jpeg == jpeg.size) {
+                send_all(client, "\r\n", 2);
+            }
             free(jpeg.data);
+            if (sent_boundary != (int)boundary.size() || sent_jpeg != jpeg.size) {
+                return;  // 客户端断开, 停止本连接
+            }
         }
         std::this_thread::sleep_for(std::chrono::milliseconds(30));  // ~30fps
     }
@@ -226,6 +246,7 @@ static void handle_client(SOCKET client, astra::StreamReader& reader) {
 int main(int argc, char** argv) {
 #ifdef _WIN32
     SetConsoleOutputCP(CP_UTF8);
+    SetConsoleCtrlHandler(console_ctrl_handler, TRUE);  // FIX-15: Ctrl+C 优雅退出
 #endif
     int port = 8080;
     if (argc > 1) port = atoi(argv[1]);
@@ -260,15 +281,18 @@ int main(int argc, char** argv) {
     listen(server, 5);
     std::cout << "[RGB] 就绪: 浏览器打开 http://localhost:" << port << "/stream" << std::endl;
 
+    // FIX-15: 保存连接线程, 退出时 join (原 detach 会在 astra::terminate() 后访问已释放 reader)
+    std::vector<std::thread> clients;
     while (g_running) {
         SOCKET client = accept(server, nullptr, nullptr);
         if (client != INVALID_SOCKET) {
-            // 每个连接一个线程 (简单处理)
-            std::thread t(handle_client, client, std::ref(reader));
-            t.detach();
+            clients.emplace_back(handle_client, client, std::ref(reader));
         }
     }
 
+    for (auto& t : clients) {
+        if (t.joinable()) t.join();
+    }
     closesocket(server);
     WSACleanup();
     astra::terminate();
