@@ -95,8 +95,7 @@ install(TARGETS safety_node chassis_bridge_node
 install(DIRECTORY launch
   DESTINATION share/${PROJECT_NAME}
 )
-install(DIRECTORY config
-  DESTINATION share/${PROJECT_NAME}
-)
+# 注: 融合结果以 std_msgs/String (JSON) 发布、节点参数内联在 launch 中 (FIX-16/ROS-6),
+#     已删除无消费方的 msg/FusionResult.msg 与 config/safety_params.yaml
 
 ament_package()
