@@ -31,6 +31,7 @@
 #else
 #include <cerrno>
 #include <fcntl.h>
+#include <termios.h>
 #include <unistd.h>
 #endif
 
@@ -159,19 +160,68 @@ private:
         // Windows: COMx 串口 (测试用)
         std::string win_port = port_;
         if (win_port.rfind("/dev/tty", 0) == 0) win_port = "COM3";  // 默认映射
-        fd_ = reinterpret_cast<intptr_t>(CreateFileA(
+        HANDLE h = CreateFileA(
             win_port.c_str(), GENERIC_READ | GENERIC_WRITE, 0, nullptr,
-            OPEN_EXISTING, 0, nullptr));
-        if (fd_ == (intptr_t)INVALID_HANDLE_VALUE) {
+            OPEN_EXISTING, 0, nullptr);
+        if (h == INVALID_HANDLE_VALUE) {
             std::cerr << "[ChassisBridge:stm32] 无法打开串口 " << win_port << std::endl;
             fd_ = -1;
+            return;
         }
+        // 配置 115200 8N1 无流控 (与 21 字节帧协议一致, FIX-7/ROS-2)
+        DCB dcb{};
+        dcb.DCBlength = sizeof(DCB);
+        if (GetCommState(h, &dcb)) {
+            dcb.BaudRate = static_cast<DWORD>(baudrate_);
+            dcb.ByteSize = 8;
+            dcb.Parity = NOPARITY;
+            dcb.StopBits = ONESTOPBIT;
+            dcb.fParity = FALSE;
+            dcb.fOutxCtsFlow = FALSE;
+            dcb.fOutxDsrFlow = FALSE;
+            dcb.fDtrControl = DTR_CONTROL_DISABLE;
+            dcb.fDsrSensitivity = FALSE;
+            dcb.fOutX = FALSE;
+            dcb.fInX = FALSE;
+            dcb.fRtsControl = RTS_CONTROL_DISABLE;
+            if (!SetCommState(h, &dcb))
+                std::cerr << "[ChassisBridge:stm32] SetCommState 失败 (baudrate="
+                          << baudrate_ << ")" << std::endl;
+        }
+        // 写操作不无限阻塞
+        COMMTIMEOUTS timeouts{};
+        timeouts.WriteTotalTimeoutConstant = 100;
+        timeouts.WriteTotalTimeoutMultiplier = 10;
+        SetCommTimeouts(h, &timeouts);
+        fd_ = reinterpret_cast<intptr_t>(h);
+        std::cout << "[ChassisBridge:stm32] 串口 " << win_port << " 已打开 @ "
+                  << baudrate_ << " 8N1" << std::endl;
 #else
         fd_ = ::open(port_.c_str(), O_RDWR | O_NOCTTY | O_NONBLOCK);
         if (fd_ < 0) {
             std::cerr << "[ChassisBridge:stm32] 无法打开串口 " << port_
                       << " (errno=" << errno << ")" << std::endl;
+            return;
         }
+        // 配置 115200 8N1 无流控, 关 canonical/echo (FIX-7/ROS-2)
+        struct termios tio;
+        if (tcgetattr(fd_, &tio) == 0) {
+            speed_t speed = B115200;  // 默认 115200; 常用备选档位
+            if (baudrate_ == 57600)      speed = B57600;
+            else if (baudrate_ == 38400) speed = B38400;
+            else if (baudrate_ == 19200) speed = B19200;
+            else if (baudrate_ == 9600)  speed = B9600;
+            cfsetispeed(&tio, speed);
+            cfsetospeed(&tio, speed);
+            tio.c_cflag &= ~(CSIZE | PARENB | CSTOPB | CRTSCTS);
+            tio.c_cflag |= (CS8 | CLOCAL | CREAD);
+            tio.c_iflag &= ~(IXON | IXOFF | IXANY | ICRNL | INLCR);
+            tio.c_lflag &= ~(ICANON | ECHO | ECHONL | ISIG);
+            tio.c_oflag &= ~OPOST;
+            tcsetattr(fd_, TCSANOW, &tio);
+        }
+        std::cout << "[ChassisBridge:stm32] 串口 " << port_ << " 已打开 @ "
+                  << baudrate_ << " 8N1" << std::endl;
 #endif
     }
 
