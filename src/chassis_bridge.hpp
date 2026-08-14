@@ -96,7 +96,7 @@ public:
     }
 
     void send_velocity(double linear, double angular) override {
-        // 限幅 (与师兄 wheel_board_bridge_node 层2一致)
+        // 限幅 (与师兄 wheel_board_bridge_node 层2一致; 与 config.h PlannerConfig 上限对齐, FIX-8)
         if (linear > 0.20) linear = 0.20;
         if (linear < -0.20) linear = -0.20;
         if (angular > 0.60) angular = 0.60;
