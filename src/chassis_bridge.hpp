@@ -19,6 +19,11 @@
  */
 #pragma once
 
+// MSVC 默认不定义 M_PI (需 _USE_MATH_DEFINES), 自定义兜底保证跨平台编译 (nit)
+#ifndef M_PI
+#define M_PI 3.14159265358979323846
+#endif
+
 #include <cmath>
 #include <cstdint>
 #include <cstring>

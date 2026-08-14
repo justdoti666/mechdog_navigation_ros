@@ -103,11 +103,19 @@ static void draw_text_gdiplus(uint8_t* rgb, int w, int h,
 // ============ 极简 HTTP MJPEG 服务器 ============
 static std::atomic<bool> g_running{true};
 
+// 监听 socket 提升为全局: Ctrl+C handler 需 closesocket 打断阻塞的 accept (should-fix)
+static SOCKET g_server = INVALID_SOCKET;
+
 // 控制台 Ctrl+C / 关闭窗口: 置退出标志 (FIX-15/ROS-5)
 static BOOL WINAPI console_ctrl_handler(DWORD ctrl_type) {
     if (ctrl_type == CTRL_C_EVENT || ctrl_type == CTRL_CLOSE_EVENT ||
         ctrl_type == CTRL_BREAK_EVENT) {
         g_running = false;
+        // 打断主线程阻塞的 accept(): 关闭监听 socket 使其返回 INVALID_SOCKET 并退出循环
+        if (g_server != INVALID_SOCKET) {
+            closesocket(g_server);
+            g_server = INVALID_SOCKET;
+        }
         return TRUE;
     }
     return FALSE;
@@ -178,8 +186,6 @@ static void handle_stream(SOCKET client, astra::StreamReader& reader) {
         return;  // 客户端已断开
     }
 
-    auto colorStream = reader.stream<astra::ColorStream>();
-    auto depthStream = reader.stream<astra::DepthStream>();
     const int width = 640, height = 480;
     std::vector<uint8_t> rgb(width * height * 3);
 
@@ -269,22 +275,22 @@ int main(int argc, char** argv) {
     // 初始化 Winsock
     WSADATA wsa;
     WSAStartup(MAKEWORD(2, 2), &wsa);
-    SOCKET server = socket(AF_INET, SOCK_STREAM, 0);
+    g_server = socket(AF_INET, SOCK_STREAM, 0);
     sockaddr_in addr{};
     addr.sin_family = AF_INET;
     addr.sin_addr.s_addr = htonl(INADDR_ANY);
     addr.sin_port = htons((u_short)port);
-    if (bind(server, (sockaddr*)&addr, sizeof(addr)) != 0) {
+    if (bind(g_server, (sockaddr*)&addr, sizeof(addr)) != 0) {
         std::cerr << "[RGB] bind 失败 (端口被占用?)" << std::endl;
         return 1;
     }
-    listen(server, 5);
+    listen(g_server, 5);
     std::cout << "[RGB] 就绪: 浏览器打开 http://localhost:" << port << "/stream" << std::endl;
 
     // FIX-15: 保存连接线程, 退出时 join (原 detach 会在 astra::terminate() 后访问已释放 reader)
     std::vector<std::thread> clients;
     while (g_running) {
-        SOCKET client = accept(server, nullptr, nullptr);
+        SOCKET client = accept(g_server, nullptr, nullptr);
         if (client != INVALID_SOCKET) {
             clients.emplace_back(handle_client, client, std::ref(reader));
         }
@@ -293,7 +299,7 @@ int main(int argc, char** argv) {
     for (auto& t : clients) {
         if (t.joinable()) t.join();
     }
-    closesocket(server);
+    if (g_server != INVALID_SOCKET) closesocket(g_server);
     WSACleanup();
     astra::terminate();
     return 0;
