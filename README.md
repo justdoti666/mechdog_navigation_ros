@@ -54,9 +54,7 @@ mechdog_navigation_ros/
 
 - ROS2 (Jazzy / Humble), colcon
 - `mechdog_navigation` 纯算法库源码（与本包**同级目录**，即 `../mechdog_navigation/`）
-- 传感器真机驱动：Astra Pro（OpenNI2 待实现）、HC-SR04（libgpiod/pigpio，Pi 5 用）、环境光强（默认 `estimate_ambient_light()` 深度图代理，TSL2591 已取消购买）
-
-## 构建 & 运行
+- 传感器真机驱动：Astra Pro（Orbbec Astra SDK，真机经 `USE_ASTRA_SDK` 编译）、HC-SR04（libgpiod/pigpio，Pi 5 用）、环境光强（默认 `estimate_ambient_light()` 深度图代理，TSL2591 已取消购买）
 
 ## 构建 & 运行
 
@@ -98,6 +96,6 @@ ros2 launch mechdog_navigation_ros safety.launch.py use_simulated:=false
 - [x] 底盘通信层（ChassisBridge 接口 + 模拟实现 + Stm32ChassisBridge 21 字节帧实现）
 - [x] 对接闸门（/unsafe/cmd_vel + sensor_data QoS）
 - [ ] ROS2 版本确认
-- [ ] 真机传感器节点（Astra OpenNI2 / HC-SR04 libgpiod）
+- [ ] 真机传感器节点（Astra SDK / HC-SR04 libgpiod）
 - [ ] Stm32ChassisBridge 串口实机联调（协议已实现, 待硬件验证）
 - [ ] Nav2 速度仲裁接入
