@@ -23,6 +23,10 @@ find_package(std_msgs REQUIRED)
 find_package(geometry_msgs REQUIRED)
 find_package(sensor_msgs REQUIRED)
 
+# 真机 Astra Pro: 与上游算法库同名开关, 透传编译定义与 SDK 链接 (FIX-6/ROS-1)
+option(USE_ASTRA_SDK "Enable Astra Pro via Orbbec Astra SDK (真机模式)" OFF)
+set(ASTRA_SDK_ROOT "" CACHE PATH "Orbbec Astra SDK 安装根目录")
+
 # 注: /fusion_result 使用 std_msgs/String (JSON), 避免自定义消息的 typesupport 链接复杂性;
 #     如需强类型消息可后续引入 rosidl_generate_interfaces (见 README 备注)
 
@@ -51,6 +55,23 @@ target_link_libraries(safety_node
   sensor_msgs::sensor_msgs
 )
 target_compile_features(safety_node PRIVATE cxx_std_17)
+
+# 真机 Astra Pro: 与上游算法库同名开关, 透传编译定义与 SDK 链接 (FIX-6/ROS-1)
+# 置于 safety_node 定义之后 (target_link_* 需要 target 已存在)
+if(USE_ASTRA_SDK)
+    if(NOT ASTRA_SDK_ROOT)
+        message(FATAL_ERROR "USE_ASTRA_SDK=ON 需要指定 -DASTRA_SDK_ROOT=<sdk根目录>")
+    endif()
+    if(NOT EXISTS "${ASTRA_SDK_ROOT}/include/astra/astra.hpp")
+        message(FATAL_ERROR "未找到 Astra SDK: ${ASTRA_SDK_ROOT}")
+    endif()
+    target_compile_definitions(mechdog_algo PRIVATE USE_ASTRA_SDK)
+    target_include_directories(mechdog_algo PRIVATE "${ASTRA_SDK_ROOT}/include")
+    target_link_directories(safety_node PRIVATE "${ASTRA_SDK_ROOT}/lib")
+    # 保持与 50 行一致的 plain 签名 (CMake 禁止同一 target 混用两种签名)
+    target_link_libraries(safety_node astra_core astra_core_api astra)
+    message(STATUS "USE_ASTRA_SDK: 真机深度驱动已启用 (${ASTRA_SDK_ROOT})")
+endif()
 
 install(TARGETS safety_node
   DESTINATION lib/${PROJECT_NAME}

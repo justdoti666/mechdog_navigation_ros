@@ -71,12 +71,12 @@ public:
                 scan_ranges_ = msg->ranges;
             });
 
-        // 定时器: 10Hz 融合周期
+        // 定时器: 5Hz 融合周期 (read_all 一轮 ≈150ms, 100ms 会回调超时漂移, FIX-5/ROS-3)
         timer_ = this->create_wall_timer(
-            100ms, std::bind(&SafetyNode::on_timer, this));
+            200ms, std::bind(&SafetyNode::on_timer, this));
 
         RCLCPP_INFO(this->get_logger(),
-            "safety_node 启动: use_simulated=%s, 融合周期 10Hz",
+            "safety_node 启动: use_simulated=%s, 融合周期 5Hz",
             use_simulated_ ? "true" : "false");
     }
 

@@ -27,7 +27,7 @@ Nav2 全局规划 ──► /unsafe/cmd_vel ──► [safety_gate_node 层1] �
 **安全要点**：
 - 本包**不直接发 `/cmd_vel`**（会绕过闸门），默认发布到 `/unsafe/cmd_vel`，由师兄 `cmd_vel_safety_gate_node` 统一安全检查后转发。可用 `-p cmd_vel_topic:=/cmd_vel` 覆盖（仅测试）。
 - 侧双层闸门 + 状态新鲜度（`/safety/state`、`/robot/state` 1s 超时即零速，fail-closed）是最终安全兜底。
-- 本包 10Hz 周期发送（>2Hz，满足师兄 0.5s 超时要求）。
+- 本包 5Hz 周期发送（>2Hz，满足师兄 0.5s 超时要求）。
 
 ### 底盘桥接两种接法（二选一）
 
