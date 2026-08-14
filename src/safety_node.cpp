@@ -103,7 +103,7 @@ private:
         msg.data = fusion_to_json(result, cmd);
         fusion_pub_->publish(msg);
 
-        // 5. 日志 (10Hz 节流: 每 10 帧打一次)
+        // 5. 日志 (5Hz 节流: 每 10 帧打一次, 即每 2 秒)
         if (++tick_ % 10 == 0) {
             RCLCPP_INFO(this->get_logger(),
                 "env=%d cliff=%s min_fwd=%.2fm action=%d vel=(%.2f, %.2f) scan=%zu",
