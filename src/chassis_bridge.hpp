@@ -103,6 +103,9 @@ public:
 
     void send_velocity(double linear, double angular) override {
         // 限幅 (与师兄 wheel_board_bridge_node 层2一致; 与 config.h PlannerConfig 上限对齐, FIX-8)
+        // 注意 (M5): 正常链路中闸门层1 (±0.08/±0.25) 先限幅, 本桥限幅 (±0.20/±0.60)
+        // 在直连模式 (cmd_vel_topic:=/cmd_vel 绕过闸门) 下才实际生效 —— 排查限幅问题时
+        // 先确认当前链路是哪一层在限。
         if (linear > 0.20) linear = 0.20;
         if (linear < -0.20) linear = -0.20;
         if (angular > 0.60) angular = 0.60;

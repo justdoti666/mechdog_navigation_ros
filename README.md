@@ -34,6 +34,8 @@ Nav2 全局规划 ──► /unsafe/cmd_vel ──► [safety_gate_node 层1] �
 1. **本包 Stm32ChassisBridge**（`bridge_type:=stm32`）：本包直接通过串口发 21 字节帧（`AA 55 0x01 0x10 + 4×float32 LE RPM + 和校验`，差速运动学轮径 0.0645m/轮距 0.256m），协议与 `wheel_board_bridge_node.py` 一致。
 2. ** wheel_board_bridge_node 接管**（推荐，联调默认）：本包保持 `bridge_type:=simulated`，由师兄栈统一管串口，避免双写。
 
+> 限幅分层说明：正常链路中安全闸门层1 先限幅（±0.08 m/s / ±0.25 rad/s），本桥限幅（±0.20/±0.60，与层2 同值）仅在直连模式（绕过闸门）下生效。排查限幅问题时先确认当前链路是哪一层在限。
+
 ## 目录结构
 
 ```
@@ -41,7 +43,7 @@ mechdog_navigation_ros/
 ├── package.xml            # ROS2 包描述 (Jazzy 默认; Humble 改 ROS_DISTRO 即可)
 ├── CMakeLists.txt         # ament_cmake, 子目录引用 ../mechdog_navigation 算法库
 ├── src/safety_node.cpp    # 主节点: 融合+规划 -> /unsafe/cmd_vel + /fusion_result
-├── src/rgb_stream.cpp     # RGB 回传+深度叠加: Astra ColorStream -> MJPEG, 叠加 DIST(中央平均)/NEAR(最近障碍)
+├── src/rgb_stream.cpp     # RGB 回传+深度叠加: Astra ColorStream -> MJPEG, 叠加 DIST(中央平均)/NEAR(最近障碍) (Windows-only, 独立 cl 编译, 未纳入 colcon 构建)
 ├── src/stb_image_write.h  # 单头文件 JPEG 编码库 (RGB 回传依赖)
 ├── src/chassis_bridge.hpp # 底盘通信抽象: ChassisBridge 接口 + 模拟/STM32(21字节帧) 实现
 ├── src/chassis_bridge_node.cpp  # 底盘桥接节点: 订阅 /cmd_vel -> 发送到底盘
