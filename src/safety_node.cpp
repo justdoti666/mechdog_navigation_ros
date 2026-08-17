@@ -24,6 +24,9 @@
 #include <memory>
 #include <sstream>
 #include <string>
+#include <atomic>
+#include <mutex>
+#include <thread>
 
 #include "rclcpp/rclcpp.hpp"
 #include "geometry_msgs/msg/twist.hpp"
@@ -59,6 +62,23 @@ public:
 
         astra_->start();
 
+        // H3: 融合移出 timer 线程 —— 真机 read_all 最坏 ~350-490ms (> 200ms 周期),
+        // 同步 fuse() 会让 timer 回调漂移累积、发布流跌破 5Hz 并逼近上游闸门 0.5s
+        // 超时 (机器人间歇零速)。独立融合线程持续 fuse() (周期 = read_all 耗时,
+        // 真机自然 ~3Hz; 模拟 ~8Hz), timer 200ms 只发布最新缓存结果:
+        // 发布流恒 5Hz, 闸门永不超时, 数据新鲜度最坏 ~350ms (步行速度可接受)。
+        fusion_running_ = true;
+        fusion_thread_ = std::thread([this]() {
+            while (fusion_running_) {
+                auto result = fusion_->fuse();
+                {
+                    std::lock_guard<std::mutex> lock(result_mutex_);
+                    latest_result_ = result;
+                    have_result_ = true;
+                }
+            }
+        });
+
         // ---- ROS2 接口 ----
         cmd_vel_pub_ = this->create_publisher<geometry_msgs::msg::Twist>(cmd_vel_topic_, 10);
         fusion_pub_ = this->create_publisher<std_msgs::msg::String>("fusion_result", 10);
@@ -71,7 +91,7 @@ public:
                 scan_ranges_ = msg->ranges;
             });
 
-        // 定时器: 5Hz 融合周期 (read_all 一轮 ≈150ms, 100ms 会回调超时漂移, FIX-5/ROS-3)
+        // 定时器: 5Hz 发布最新融合结果 (融合本身在独立线程, 见上 H3 说明)
         timer_ = this->create_wall_timer(
             200ms, std::bind(&SafetyNode::on_timer, this));
 
@@ -81,21 +101,33 @@ public:
     }
 
     ~SafetyNode() override {
+        // 先停融合线程 (join, 确保不再访问算法库), 再停 Astra 采集
+        stop_fusion_thread();
         if (astra_) astra_->stop();
     }
 
 private:
+    void stop_fusion_thread() {
+        fusion_running_ = false;
+        if (fusion_thread_.joinable()) fusion_thread_.join();
+    }
+
     void on_timer() {
-        // 1. 融合 (纯算法, 无 ROS2 依赖)
-        auto result = fusion_->fuse();
+        // 1. 取最新融合结果 (融合线程写, 本回调读, 锁保护)
+        FusionResult result;
+        {
+            std::lock_guard<std::mutex> lock(result_mutex_);
+            if (!have_result_) return;  // 首帧未就绪: 不发 (上游闸门 0.5s 超时兜底)
+            result = latest_result_;
+        }
 
         // 2. 规划
         auto cmd = planner_->plan(result);
 
-        // 3. 发布速度指令
+        // 3. 发布速度指令 (double -> float 显式窄化, 消除隐式转换警告)
         auto twist = geometry_msgs::msg::Twist();
-        twist.linear.x = cmd.linear;
-        twist.angular.z = cmd.angular;
+        twist.linear.x = static_cast<float>(cmd.linear);
+        twist.angular.z = static_cast<float>(cmd.angular);
         cmd_vel_pub_->publish(twist);
 
         // 4. 发布融合结果 (JSON 字符串, 调试/巡检决策)
@@ -123,6 +155,13 @@ private:
     std::unique_ptr<SensorFusion> fusion_;
     std::unique_ptr<PathPlanner> planner_;
 
+    // H3: 独立融合线程 + 最新结果缓存 (timer 回调只读缓存, 锁保护)
+    std::thread fusion_thread_;
+    std::atomic<bool> fusion_running_{false};
+    std::mutex result_mutex_;
+    FusionResult latest_result_;
+    bool have_result_ = false;
+
     // ROS2 接口
     rclcpp::Publisher<geometry_msgs::msg::Twist>::SharedPtr cmd_vel_pub_;
     rclcpp::Publisher<std_msgs::msg::String>::SharedPtr fusion_pub_;
@@ -132,6 +171,8 @@ private:
     bool use_simulated_ = true;
     std::string cmd_vel_topic_ = "/unsafe/cmd_vel";
     unsigned int tick_ = 0;
+    // 注: scan_ranges_ 由 /scan 回调写、timer 回调读, 单线程 executor 下串行安全;
+    //     若改多线程 executor 需加锁
     std::vector<float> scan_ranges_;  // 雷达数据缓存 (预留)
 
     // 融合结果 -> JSON (供 /fusion_result 调试与巡检决策)
