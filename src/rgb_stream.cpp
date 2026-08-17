@@ -110,12 +110,10 @@ static SOCKET g_server = INVALID_SOCKET;
 static BOOL WINAPI console_ctrl_handler(DWORD ctrl_type) {
     if (ctrl_type == CTRL_C_EVENT || ctrl_type == CTRL_CLOSE_EVENT ||
         ctrl_type == CTRL_BREAK_EVENT) {
+        // M4: 不再从 Ctrl+C 线程 closesocket 打断 accept —— 跨线程 closesocket
+        // 对阻塞 accept 不可靠, 且 g_server 存在数据竞争 (handler 线程写/主线程读)。
+        // 改为主线程 select 轮询 (200ms 超时) 检查 g_running, 循环自然退出。
         g_running = false;
-        // 打断主线程阻塞的 accept(): 关闭监听 socket 使其返回 INVALID_SOCKET 并退出循环
-        if (g_server != INVALID_SOCKET) {
-            closesocket(g_server);
-            g_server = INVALID_SOCKET;
-        }
         return TRUE;
     }
     return FALSE;
@@ -233,6 +231,12 @@ static void handle_stream(SOCKET client, astra::StreamReader& reader) {
 
 // 简单 HTTP 处理: 只响应 /stream
 static void handle_client(SOCKET client, astra::StreamReader& reader) {
+    // M4: 客户端停读时 send 永久阻塞 (TCP 缓冲满) -> 连接线程 join 挂死, 进程退不出。
+    // 设置发送超时 2s: 超时后 send_all 返回短写, 连接线程正常退出。
+    DWORD snd_timeout = 2000;
+    setsockopt(client, SOL_SOCKET, SO_SNDTIMEO,
+               reinterpret_cast<const char*>(&snd_timeout), sizeof(snd_timeout));
+
     char buf[1024];
     int n = recv(client, buf, sizeof(buf) - 1, 0);
     if (n > 0) {
@@ -287,12 +291,21 @@ int main(int argc, char** argv) {
     listen(g_server, 5);
     std::cout << "[RGB] 就绪: 浏览器打开 http://localhost:" << port << "/stream" << std::endl;
 
-    // FIX-15: 保存连接线程, 退出时 join (原 detach 会在 astra::terminate() 后访问已释放 reader)
+    // M4: select 轮询 (200ms 超时) 替代阻塞 accept —— Ctrl+C 时循环 200ms 内
+    // 自然退出, 无需跨线程 closesocket (原实现: closesocket 打断阻塞 accept
+    // 不可靠 + g_server 数据竞争); g_server 现仅主线程访问
     std::vector<std::thread> clients;
     while (g_running) {
-        SOCKET client = accept(g_server, nullptr, nullptr);
-        if (client != INVALID_SOCKET) {
-            clients.emplace_back(handle_client, client, std::ref(reader));
+        fd_set rfds;
+        FD_ZERO(&rfds);
+        FD_SET(g_server, &rfds);
+        timeval tv{0, 200000};  // 200ms
+        int r = select(0, &rfds, nullptr, nullptr, &tv);  // Windows 忽略 nfds
+        if (r > 0 && FD_ISSET(g_server, &rfds)) {
+            SOCKET client = accept(g_server, nullptr, nullptr);
+            if (client != INVALID_SOCKET) {
+                clients.emplace_back(handle_client, client, std::ref(reader));
+            }
         }
     }
 
