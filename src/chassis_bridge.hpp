@@ -118,6 +118,7 @@ public:
         double right_rpm = mps_to_rpm(right_m_s);
 
         // 4×float32 LE: FL, FR, RR, RL (两侧同速)
+        // 注: 轮序 FL=left/FR=right/RR=right/RL=left 为差速假定, 待 STM32 实机联调验证
         uint8_t frame[21];
         frame[0] = 0xAA;
         frame[1] = 0x55;

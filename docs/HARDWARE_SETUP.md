@@ -169,7 +169,7 @@ Windows 版用了 winsock + GDI+，树莓派（Linux）需替换：
 
 | 仓库 | 内容 | 最新 commit |
 |---|---|---|
-| `justdoti666/mechdog_navigation` | 纯算法库（F2 真机驱动、融合、规划） | ed345af（F2）|
-| `justdoti666/mechdog_navigation_ros` | ROS2 胶水包（safety_node、chassis_bridge、rgb_stream） | 7a25ddb（RGB+深度）|
+| `justdoti666/mechdog_navigation` | 纯算法库（F2 真机驱动、融合、规划） | 以 `git log` 为准（示例历史: ed345af F2 → b84c8c7 文档 → 48a17e7 M 系列） |
+| `justdoti666/mechdog_navigation_ros` | ROS2 胶水包（safety_node、chassis_bridge、rgb_stream） | 以 `git log` 为准（示例历史: 7a25ddb RGB+深度 → 3007099 ROS-5 补 → 3e62096 M 系列） |
 
 **release v1.0.0-drivers**：AstraSDK-v2.1.3-Linux-arm.zip（树莓派）/ default.zip（Win 驱动）/ OpenNI_2.3.0.86_windows.zip（Win OpenNI2）
