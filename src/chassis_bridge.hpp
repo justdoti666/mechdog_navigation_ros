@@ -131,9 +131,19 @@ public:
         if (fd_ >= 0) {
 #ifdef _WIN32
             DWORD written = 0;
-            WriteFile(reinterpret_cast<HANDLE>(fd_), frame, sizeof(frame), &written, nullptr);
+            BOOL ok = WriteFile(reinterpret_cast<HANDLE>(fd_), frame, sizeof(frame), &written, nullptr);
+            // H4: 返回值与实发字节数必须检查 —— 短写不重试会导致 STM32 收到半个帧
+            if (!ok || written != sizeof(frame)) {
+                std::cerr << "[ChassisBridge:stm32] 串口写失败/短写: ok=" << ok
+                          << " written=" << written << "/" << sizeof(frame) << std::endl;
+            }
 #else
-            ::write(fd_, frame, sizeof(frame));
+            ssize_t n = ::write(fd_, frame, sizeof(frame));
+            if (n != (ssize_t)sizeof(frame)) {
+                // H4: O_NONBLOCK 下 TX 缓冲满会短写/EAGAIN, 必须上报, 否则 STM32 收到半个帧
+                std::cerr << "[ChassisBridge:stm32] 串口写失败/短写: written=" << n
+                          << "/" << sizeof(frame) << " errno=" << errno << std::endl;
+            }
 #endif
             std::cout << "[ChassisBridge:stm32] vx=" << linear
                       << " wz=" << angular
