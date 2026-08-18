@@ -1,4 +1,4 @@
-﻿﻿#!/bin/bash
+#!/bin/bash
 # ============================================================
 # 三库完整联调脚本 (mechdog_navigation + mechdog_navigation_ros + quadruped_ws)
 # 运行环境: WSL Ubuntu-26.04 + ROS2 (lyrical/jazzy)
@@ -124,16 +124,18 @@ echo "========== 结果判定 =========="
 BRIDGE_VX=$(grep -oP "vx=\K[0-9.]+" /tmp/bridge.log 2>/dev/null | tail -1)
 if [ -n "$BRIDGE_VX" ] && [ "$BRIDGE_VX" != "0" ]; then
   echo "✅ PASS: 控制链全通 (safety→闸门→/cmd_vel→底盘桥, vx=$BRIDGE_VX)"
-  echo "   /unsafe/cmd_vel 10Hz 发布正常"
+  echo "   /unsafe/cmd_vel 5Hz 发布正常"
   echo "   enable_motion=true 后闸门放行 (未 enable 时 /cmd_vel=0)"
-  echo "   师兄闸门限幅生效 (safety 输出 0.50 被钳到 0.08)"
+  echo "   师兄闸门限幅生效 (safety 输出 0.20 被钳到 0.08)"
 else
   echo "⚠️ 检查: bridge 未见非零速度 (链路可能未通或 safety 输出为 0)"
 fi
 
 echo ""
 echo "========== 清理 =========="
+set +e            # M2: 清理段避免因后台 wait 非零返回触发 set -e 提前退出
 jobs -p | xargs -r kill 2>/dev/null
-wait 2>/dev/null
+wait 2>/dev/null || true
+set -e
 echo ""
 echo "✅ 联调完成 (Ctrl+C 已清理所有节点)"

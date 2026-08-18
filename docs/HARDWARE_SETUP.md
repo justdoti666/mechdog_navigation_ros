@@ -66,14 +66,18 @@ source install/setup.bash
 
 ## 3. HC-SR04 ×4 接入（避障 + 防摔落）
 
-**物理接线**（每个 HC-SR04 4 针，共 4 颗）：
+**物理接线**（每个 HC-SR04 4 针，共 4 颗；GPIO 布局以 `mechdog_navigation/config.h` 为准）：
 ```
 HC-SR04 → 树莓派 GPIO
 VCC     → Pin 2 (5V)
 GND     → Pin 6 (GND)
-TRIG    → GPIO17 / GPIO22 / GPIO23 / GPIO24   （左前/右前/正前/底部）
-ECHO    → GPIO27 / GPIO25 / GPIO5  / GPIO6
+前左 TRIG/ECHO → GPIO23 / GPIO24
+正前 TRIG/ECHO → GPIO17 / GPIO27
+前右 TRIG/ECHO → GPIO5  / GPIO6
+底部 TRIG/ECHO → GPIO13 / GPIO19
 ⚠️ ECHO 是 5V 输出，必须分压到 3.3V 再接树莓派（电阻分压：2.2kΩ 串联 + 3.3kΩ 到地）
+⚠️ 接线对照必须与 `config.h` 的 ultrasonic_layout 一致（front_left=23/24, front_center=17/27,
+   front_right=5/6, bottom=13/19），照此前版本文档（TRIG=17/22/23/24）接线会与驱动不符。
 ```
 
 **代码对接**（关键：宏是编译开关，不是运行时发布）：
@@ -115,21 +119,28 @@ cmake .. -DUSE_WIRINGPI=ON
 
 ---
 
-## 7. STM32 底盘通信（最后一块，需要师兄信息）
+## 7. STM32 底盘通信（协议已实现，接线/参数待实机确认）
 
-**前提**：确认第二个 STM32 的用途 + 树莓派↔STM32 通信方式（FDCAN / 串口）
+**现状**：`Stm32ChassisBridge` 已实现并固化 21 字节串口帧协议（见 `chassis_bridge.hpp`）：
+```
+AA 55 | 0x01(设四轮RPM) | 0x10(16字节payload) | FL_rpm f32LE | FR_rpm | RR_rpm | RL_rpm | Checksum
+差速运动学: left=vx−wz·base/2, right=vx+wz·base/2, rpm=v/(2πr)·60
+轮径 0.0645m / 轮距 0.256m; 默认 115200 8N1; 限幅 ±0.20/±0.60
+```
+**⚠️ 待实机验证**：
+- **轮序 FL/FR/RR/RL → L/R/R/L 是差速假定**（`chassis_bridge.hpp:120-121` 注释标注），未与 STM32 固件逐字节核对。实机**先做"左转/右转方向"冒烟测试**，若方向反号即轮序相反。
+- 波特率白名单 115200/57600/38400/19200/9600（其他值报错退出）。
+- 串口短写已自动重试 3 次。
 
 **步骤**：
 ```bash
-# 7.1 问师兄："底盘接收什么格式的速度指令？（线速度+角速度，还是别的协议？走 FDCAN 还是串口？）"
-# 7.2 在 chassis_bridge.hpp 的 Stm32ChassisBridge::send_velocity() 里填发送代码
-#     例如串口：serial.write("v=0.5,w=0.0\n")
-# 7.3 launch 参数切真机
+# 7.1 实机冒烟: 先验证转向方向正确 (H3), 若反则核对轮序
+# 7.2 launch 参数切真机 (serial_port / baudrate 可用参数覆盖默认 /dev/ttyACM0 115200)
 ros2 launch mechdog_navigation_ros safety.launch.py bridge_type:=stm32
 ```
 
 **代码位置**：
-- `mechdog_navigation_ros/src/chassis_bridge.hpp`（Stm32ChassisBridge 占位，TODO 注释处）
+- `mechdog_navigation_ros/src/chassis_bridge.hpp`（Stm32ChassisBridge 已实现，21 字节帧）
 
 ---
 

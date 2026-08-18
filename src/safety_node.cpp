@@ -21,6 +21,7 @@
  *       # 若想直接接管 /cmd_vel (不经闸门, 仅测试): --ros-args -p cmd_vel_topic:=/cmd_vel
  */
 #include <chrono>
+#include <condition_variable>
 #include <memory>
 #include <sstream>
 #include <string>
@@ -69,14 +70,22 @@ public:
         // 发布流恒 5Hz, 闸门永不超时, 数据新鲜度最坏 ~350ms (步行速度可接受)。
         fusion_running_ = true;
         fusion_thread_ = std::thread([this]() {
-            while (fusion_running_) {
+            while (true) {
                 auto result = fusion_->fuse();
                 {
                     std::lock_guard<std::mutex> lock(result_mutex_);
                     latest_result_ = result;
                     have_result_ = true;
+                    last_fusion_update_ = std::chrono::steady_clock::now();
                 }
+                if (!fusion_running_.load()) break;  // 剩余一次 fuse 后立刻响应停止
             }
+            // H5: 通知退出 (供 stop_fusion_thread 带超时等待, 避免 join 挂死)
+            {
+                std::lock_guard<std::mutex> lk(fusion_exit_mutex_);
+                fusion_exited_ = true;
+            }
+            fusion_exit_cv_.notify_all();
         });
 
         // ---- ROS2 接口 ----
@@ -107,22 +116,58 @@ public:
     }
 
 private:
+    // H5 修复: 若融合线程已卡死在阻塞读 (C1 场景), 无超时 join() 会永久挂起 ->
+    // 析构/spin 退出挂死。用带超时的 wait_for 等待退出通知, 超时则 detach 兜底
+    // (进程退出时由 OS 回收, 避免 join 挂死)。正常情况融合线程会因标志退出并通知。
     void stop_fusion_thread() {
         fusion_running_ = false;
+        if (!fusion_thread_.joinable()) return;
+        {
+            std::unique_lock<std::mutex> lk(fusion_exit_mutex_);
+            bool exited = fusion_exit_cv_.wait_for(
+                lk, std::chrono::milliseconds(500), [this] { return fusion_exited_; });
+            if (!exited) {
+                // 500ms 内未退出 (融合线程阻塞) -> detach 兜底, 不再等待
+                fusion_thread_.detach();
+                RCLCPP_WARN(this->get_logger(),
+                    "融合线程 500ms 内未退出, 已 detach 兜底 (疑似卡死在阻塞读)");
+                return;
+            }
+        }
         if (fusion_thread_.joinable()) fusion_thread_.join();
     }
 
     void on_timer() {
         // 1. 取最新融合结果 (融合线程写, 本回调读, 锁保护)
         FusionResult result;
+        bool fresh = false;
         {
             std::lock_guard<std::mutex> lock(result_mutex_);
             if (!have_result_) return;  // 首帧未就绪: 不发 (上游闸门 0.5s 超时兜底)
-            result = latest_result_;
+
+            // C1 修复: 新鲜度看门狗。FusionResult.timestamp 存在但从未被消费 ——
+            // 融合线程一旦静默卡死 (真机 USB 断开 / fuse() 阻塞 / 读传感器挂起),
+            // 旧实现会以 5Hz 无限期发布同一份陈旧指令 (fail-unsafe: 上游闸门只判
+            // "0.5s 内收到消息" 的链路存活, 无法识别内容过期)。超过 500ms 未产出
+            // 新融合结果 -> 视为陈旧, 丢弃缓存并发布安全零速。
+            auto now = std::chrono::steady_clock::now();
+            fresh = (now - last_fusion_update_) <= std::chrono::milliseconds(500);
+            if (fresh) {
+                result = latest_result_;
+            } else {
+                have_result_ = false;  // 数据过期, 丢弃缓存
+            }
         }
 
-        // 2. 规划
-        auto cmd = planner_->plan(result);
+        // 2. 规划 (陈旧时生成本地零速指令, 不再用 planner)
+        VelocityCmd cmd;
+        if (fresh) {
+            cmd = planner_->plan(result);
+        } else {
+            cmd.linear = 0.0; cmd.angular = 0.0;
+            RCLCPP_WARN_THROTTLE(this->get_logger(), *this->get_clock(), 2000,
+                "融合结果陈旧(>500ms), 发布安全零速 (疑似融合线程卡死)");
+        }
 
         // 3. 发布速度指令 (double -> float 显式窄化, 消除隐式转换警告)
         auto twist = geometry_msgs::msg::Twist();
@@ -161,6 +206,12 @@ private:
     std::mutex result_mutex_;
     FusionResult latest_result_;
     bool have_result_ = false;
+    // C1: 最新融合结果产出时刻 (融合线程写, on_timer 读, 同一把锁保护)
+    std::chrono::steady_clock::time_point last_fusion_update_{};
+    // H5: 融合线程退出信号 (避免无超时 join 挂死)
+    std::mutex fusion_exit_mutex_;
+    std::condition_variable fusion_exit_cv_;
+    bool fusion_exited_ = false;
 
     // ROS2 接口
     rclcpp::Publisher<geometry_msgs::msg::Twist>::SharedPtr cmd_vel_pub_;

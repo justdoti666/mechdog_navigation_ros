@@ -3,7 +3,7 @@ project(mechdog_navigation_ros)
 
 # ROS2 版本兼容: Jazzy (Ubuntu 24.04) 默认; Humble 需改 ROS_DISTRO 环境变量, 代码无需改动
 if(NOT CMAKE_CXX_STANDARD)
-  set(CMAKE_CXX_STANDARD 17)
+  set(CMAKE_CXX_STANDARD 20)
   set(CMAKE_CXX_STANDARD_REQUIRED ON)
 endif()
 
@@ -39,7 +39,7 @@ add_library(mechdog_algo OBJECT
   ${MECHDOG_ALGO_DIR}/path_planner.cpp
 )
 target_include_directories(mechdog_algo PRIVATE ${MECHDOG_ALGO_DIR})
-target_compile_features(mechdog_algo PRIVATE cxx_std_17)
+target_compile_features(mechdog_algo PRIVATE cxx_std_20)
 
 # 主节点: 局部安全层 (融合 + 规划 + 速度仲裁)
 add_executable(safety_node src/safety_node.cpp)
@@ -54,7 +54,7 @@ target_link_libraries(safety_node
   geometry_msgs::geometry_msgs
   sensor_msgs::sensor_msgs
 )
-target_compile_features(safety_node PRIVATE cxx_std_17)
+target_compile_features(safety_node PRIVATE cxx_std_20)
 
 # 真机 Astra Pro: 与上游算法库同名开关, 透传编译定义与 SDK 链接 (FIX-6/ROS-1)
 # 置于 safety_node 定义之后 (target_link_* 需要 target 已存在)
@@ -73,10 +73,6 @@ if(USE_ASTRA_SDK)
     message(STATUS "USE_ASTRA_SDK: 真机深度驱动已启用 (${ASTRA_SDK_ROOT})")
 endif()
 
-install(TARGETS safety_node
-  DESTINATION lib/${PROJECT_NAME}
-)
-
 # 底盘通信节点: 订阅 /cmd_vel -> ChassisBridge (simulated/stm32)
 add_executable(chassis_bridge_node src/chassis_bridge_node.cpp)
 target_include_directories(chassis_bridge_node PRIVATE
@@ -86,7 +82,7 @@ target_link_libraries(chassis_bridge_node
   rclcpp::rclcpp
   geometry_msgs::geometry_msgs
 )
-target_compile_features(chassis_bridge_node PRIVATE cxx_std_17)
+target_compile_features(chassis_bridge_node PRIVATE cxx_std_20)
 
 install(TARGETS safety_node chassis_bridge_node
   DESTINATION lib/${PROJECT_NAME}

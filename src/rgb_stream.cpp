@@ -237,6 +237,13 @@ static void handle_client(SOCKET client, astra::StreamReader& reader) {
     setsockopt(client, SOL_SOCKET, SO_SNDTIMEO,
                reinterpret_cast<const char*>(&snd_timeout), sizeof(snd_timeout));
 
+    // H1 修复: recv 也需接收超时。已 connect 但不发请求行的客户端, recv 永久阻塞,
+    // 退出时对 clients 的 t.join() 永远等不到 -> 进程退不出。
+    // (SO_SNDTIMEO 只管 send; recv 需单独设 SO_RCVTIMEO)
+    DWORD rcv_timeout = 5000;
+    setsockopt(client, SOL_SOCKET, SO_RCVTIMEO,
+               reinterpret_cast<const char*>(&rcv_timeout), sizeof(rcv_timeout));
+
     char buf[1024];
     int n = recv(client, buf, sizeof(buf) - 1, 0);
     if (n > 0) {

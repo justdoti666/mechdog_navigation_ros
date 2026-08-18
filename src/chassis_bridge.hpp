@@ -30,6 +30,8 @@
 #include <iostream>
 #include <memory>
 #include <string>
+#include <thread>
+#include <chrono>
 
 #ifdef _WIN32
 #include <windows.h>
@@ -133,33 +135,65 @@ public:
         frame[20] = cs;
 
         if (fd_ >= 0) {
-#ifdef _WIN32
-            DWORD written = 0;
-            BOOL ok = WriteFile(reinterpret_cast<HANDLE>(fd_), frame, sizeof(frame), &written, nullptr);
-            // H4: 返回值与实发字节数必须检查 —— 短写不重试会导致 STM32 收到半个帧
-            if (!ok || written != sizeof(frame)) {
-                std::cerr << "[ChassisBridge:stm32] 串口写失败/短写: ok=" << ok
-                          << " written=" << written << "/" << sizeof(frame) << std::endl;
+            // H4 修复: 串口短写/失败必须重试, 否则 STM32 收到半个帧。
+            // 旧实现单次 write/WriteFile, 短写 (或 O_NONBLOCK 下 EAGAIN/TX 满) 仅打日志。
+            if (!write_frame_all(frame, sizeof(frame))) {
+                std::cerr << "[ChassisBridge:stm32] 串口写失败/短写 (重试后仍失败): "
+                          << sizeof(frame) << " 字节" << std::endl;
             }
-#else
-            ssize_t n = ::write(fd_, frame, sizeof(frame));
-            if (n != (ssize_t)sizeof(frame)) {
-                // H4: O_NONBLOCK 下 TX 缓冲满会短写/EAGAIN, 必须上报, 否则 STM32 收到半个帧
-                std::cerr << "[ChassisBridge:stm32] 串口写失败/短写: written=" << n
-                          << "/" << sizeof(frame) << " errno=" << errno << std::endl;
-            }
-#endif
             std::cout << "[ChassisBridge:stm32] vx=" << linear
                       << " wz=" << angular
                       << " RPM(L=" << left_rpm << ",R=" << right_rpm << ")"
                       << " frame=" << (int)frame[2] << "/" << (int)frame[20]
                       << std::endl;
         } else {
-            std::cerr << "[ChassisBridge:stm32] 串口未打开, 丢弃指令" << std::endl;
+            // Low 修复: 串口未打开时避免每帧 (5Hz) cerr 刷屏 -- 每 25 帧打一次 (约 5s)
+            ++not_open_count_;
+            if (not_open_tick_ >= 25) {
+                not_open_tick_ = 0;
+                std::cerr << "[ChassisBridge:stm32] 串口未打开, 丢弃指令"
+                          << " (已连续丢弃 " << not_open_count_ << " 条)" << std::endl;
+            }
+            ++not_open_tick_;
         }
     }
 
 private:
+    // H4 修复: 全量写入 + 重试。串口短写 (O_NONBLOCK 下 EAGAIN/TX 满, Windows 下
+    // 缓冲满) 会导致 STM32 收到半个帧。循环补齐未写字节, 有限重试 3 轮。
+    bool write_frame_all(const uint8_t* data, size_t len) {
+        const int kMaxRetries = 3;
+        size_t sent = 0;
+        for (int attempt = 0; attempt < kMaxRetries && sent < len; ++attempt) {
+#ifdef _WIN32
+            DWORD written = 0;
+            BOOL ok = WriteFile(reinterpret_cast<HANDLE>(fd_), data + sent,
+                                (DWORD)(len - sent), &written, nullptr);
+            if (!ok) return false;
+            sent += written;
+#else
+            ssize_t n = ::write(fd_, data + sent, len - sent);
+            if (n < 0) {
+                // O_NONBLOCK 下 TX 满 -> EAGAIN, 稍等重试; 其他错误直接放弃
+                if (errno == EAGAIN || errno == EWOULDBLOCK) {
+                    std::this_thread::sleep_for(std::chrono::milliseconds(2));
+                    continue;
+                }
+                return false;
+            }
+            sent += (size_t)n;
+#endif
+            if (sent < len) {
+                std::this_thread::sleep_for(std::chrono::milliseconds(2));
+            }
+        }
+        return sent == len;
+    }
+
+    // Low: 串口未打开时的节流刷屏计数
+    unsigned int not_open_tick_ = 0;
+    unsigned long not_open_count_ = 0;
+
     double mps_to_rpm(double v) const {
         if (wheel_radius_m_ <= 0.0) return 0.0;
         return v / (2.0 * M_PI * wheel_radius_m_) * 60.0;
@@ -225,19 +259,34 @@ private:
         // 配置 115200 8N1 无流控, 关 canonical/echo (FIX-7/ROS-2)
         struct termios tio;
         if (tcgetattr(fd_, &tio) == 0) {
-            speed_t speed = B115200;  // 默认 115200; 常用备选档位
-            if (baudrate_ == 57600)      speed = B57600;
-            else if (baudrate_ == 38400) speed = B38400;
-            else if (baudrate_ == 19200) speed = B19200;
-            else if (baudrate_ == 9600)  speed = B9600;
-            cfsetispeed(&tio, speed);
-            cfsetospeed(&tio, speed);
+            // M1 修复: 波特率白名单外不再静默降级 B115200 —— 否则联调时以为用了目标
+            // 波特率实际是 115200, 帧时序完全错乱。非法波特率直接报错退出。
+            speed_t speed;
+            switch (baudrate_) {
+                case 115200: speed = B115200; break;
+                case 57600:  speed = B57600;  break;
+                case 38400:  speed = B38400;  break;
+                case 19200:  speed = B19200;  break;
+                case 9600:   speed = B9600;   break;
+                default:
+                    std::cerr << "[ChassisBridge:stm32] 非法波特率 " << baudrate_
+                              << " (支持 115200/57600/38400/19200/9600)" << std::endl;
+                    ::close(fd_); fd_ = -1; return;
+            }
+            // M1: 检查 cfsetispeed/cfsetospeed/tcsetattr 返回值 —— 失败仍以残旧参数运行为静默故障
+            if (cfsetispeed(&tio, speed) != 0 || cfsetospeed(&tio, speed) != 0) {
+                std::cerr << "[ChassisBridge:stm32] cfset speed 失败 (baudrate="
+                          << baudrate_ << ")" << std::endl;
+            }
             tio.c_cflag &= ~(CSIZE | PARENB | CSTOPB | CRTSCTS);
             tio.c_cflag |= (CS8 | CLOCAL | CREAD);
             tio.c_iflag &= ~(IXON | IXOFF | IXANY | ICRNL | INLCR);
             tio.c_lflag &= ~(ICANON | ECHO | ECHONL | ISIG);
             tio.c_oflag &= ~OPOST;
-            tcsetattr(fd_, TCSANOW, &tio);
+            if (tcsetattr(fd_, TCSANOW, &tio) != 0) {
+                std::cerr << "[ChassisBridge:stm32] tcsetattr 失败 (errno="
+                          << errno << ")" << std::endl;
+            }
         }
         std::cout << "[ChassisBridge:stm32] 串口 " << port_ << " 已打开 @ "
                   << baudrate_ << " 8N1" << std::endl;
