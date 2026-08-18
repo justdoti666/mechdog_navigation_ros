@@ -117,20 +117,23 @@ public:
 
 private:
     // H5 修复: 若融合线程已卡死在阻塞读 (C1 场景), 无超时 join() 会永久挂起 ->
-    // 析构/spin 退出挂死。用带超时的 wait_for 等待退出通知, 超时则 detach 兜底
-    // (进程退出时由 OS 回收, 避免 join 挂死)。正常情况融合线程会因标志退出并通知。
+    // 析构/spin 退出挂死。用带超时的 wait_for 等待退出通知, 超时则 detach 兜底。
+    // R2: 等待提到 2s —— 真机最坏 fuse() 周期 ~490ms, 正常退出远快于 2s; 2s 后仍
+    // 未退说明线程真卡死在阻塞读, detach 概率近乎零。detach 的 UAF 窗口 (线程稍后从
+    // 阻塞恢复会访问已析构 this) 因此也缩到仅剩"真卡死 + 进程已开始析构"的极端场景,
+    // 由进程退出兜底 (OS 回收线程, 不再访问成员)。
     void stop_fusion_thread() {
         fusion_running_ = false;
         if (!fusion_thread_.joinable()) return;
         {
             std::unique_lock<std::mutex> lk(fusion_exit_mutex_);
             bool exited = fusion_exit_cv_.wait_for(
-                lk, std::chrono::milliseconds(500), [this] { return fusion_exited_; });
+                lk, std::chrono::milliseconds(2000), [this] { return fusion_exited_; });
             if (!exited) {
-                // 500ms 内未退出 (融合线程阻塞) -> detach 兜底, 不再等待
+                // 2s 内未退出 (融合线程真实卡死) -> detach 兜底, 不再等待
                 fusion_thread_.detach();
                 RCLCPP_WARN(this->get_logger(),
-                    "融合线程 500ms 内未退出, 已 detach 兜底 (疑似卡死在阻塞读)");
+                    "融合线程 2s 内未退出, 已 detach 兜底 (疑似卡死在阻塞读)");
                 return;
             }
         }
@@ -148,10 +151,11 @@ private:
             // C1 修复: 新鲜度看门狗。FusionResult.timestamp 存在但从未被消费 ——
             // 融合线程一旦静默卡死 (真机 USB 断开 / fuse() 阻塞 / 读传感器挂起),
             // 旧实现会以 5Hz 无限期发布同一份陈旧指令 (fail-unsafe: 上游闸门只判
-            // "0.5s 内收到消息" 的链路存活, 无法识别内容过期)。超过 500ms 未产出
-            // 新融合结果 -> 视为陈旧, 丢弃缓存并发布安全零速。
+            // "0.5s 内收到消息" 的链路存活, 无法识别内容过期)。
+            // R1: 阈值 800ms = 真机最坏 fuse() 周期 (~490ms) × ~1.6 裕量 —— 原 500ms
+            // 与上界贴边, 单次调度抖动超 500ms 会触发假性零速 (安全侧但间歇停摆)。
             auto now = std::chrono::steady_clock::now();
-            fresh = (now - last_fusion_update_) <= std::chrono::milliseconds(500);
+            fresh = (now - last_fusion_update_) <= std::chrono::milliseconds(800);
             if (fresh) {
                 result = latest_result_;
             } else {
