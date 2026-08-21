@@ -30,6 +30,7 @@
 #include <thread>
 
 #include "rclcpp/rclcpp.hpp"
+#include "rclcpp/executors/single_threaded_executor.hpp"  // ROS-5: main 用 SingleThreadedExecutor (显式 include, 不依赖聚合头传递)
 #include "geometry_msgs/msg/twist.hpp"
 #include "sensor_msgs/msg/laser_scan.hpp"
 #include "std_msgs/msg/string.hpp"
@@ -63,22 +64,35 @@ public:
 
         astra_->start();
 
-        // H3: 融合移出 timer 线程 —— 真机 read_all 最坏 ~350-490ms (> 200ms 周期),
-        // 同步 fuse() 会让 timer 回调漂移累积、发布流跌破 5Hz 并逼近上游闸门 0.5s
-        // 超时 (机器人间歇零速)。独立融合线程持续 fuse() (周期 = read_all 耗时,
-        // 真机自然 ~3Hz; 模拟 ~8Hz), timer 200ms 只发布最新缓存结果:
-        // 发布流恒 5Hz, 闸门永不超时, 数据新鲜度最坏 ~350ms (步行速度可接受)。
+        // H3: 融合移出 timer 线程。真机 fuse() = read_all(3 颗前向) + 微秒级融合计算,
+        //   最坏 ~135ms (无回波或 echo 卡高, 均每颗 25ms×3 + 2×30ms 间隔; ALG-2 v2.3 校准,
+        //   measure_distance 两段忙等单次只超时其一, 非 50ms/颗; 原 350-490ms 偏高)。
+        //   虽 135ms < 200ms timer 周期, 仍独立线程: 发布恒 5Hz 不受 fuse 抖动影响,
+        //   且新鲜度看门狗 (800ms, ROS-4) 兜底 fuse 阻塞 (USB 断开等极端情形)。
+        //   模拟 ~60ms/16.7Hz, 真机典型 ~80-115ms/9-12Hz, 最坏 ~135ms/7.4Hz;
+        //   timer 200ms 只发布最新缓存, 新鲜度最坏 ~135ms (步行可接受)。
+        // ROS-2 (v2.2): 加 ≥100ms 最小周期门控, 防御性卫生 (避免后续简化传感器读后空转)。
+        // ROS-3 (v2.2): stop 检查置于写共享状态之前 —— 析构中 fuse 返回则不再触碰 latest_result_,
+        //   缩 detach UAF 窗口至"仅 fuse 阻塞中"的极端情形 (真机 USB 断开; 真正根治需可取消 I/O, 见 FIX_PLAN F10)。
         fusion_running_ = true;
         fusion_thread_ = std::thread([this]() {
+            constexpr auto kMinCycle = std::chrono::milliseconds(100);  // ROS-2
             while (true) {
+                auto t0 = std::chrono::steady_clock::now();
                 auto result = fusion_->fuse();
+                // ROS-3: 先判停止, 再决定是否写共享状态 (析构中不再访问成员)
+                if (!fusion_running_.load()) break;
                 {
                     std::lock_guard<std::mutex> lock(result_mutex_);
                     latest_result_ = result;
                     have_result_ = true;
                     last_fusion_update_ = std::chrono::steady_clock::now();
                 }
-                if (!fusion_running_.load()) break;  // 剩余一次 fuse 后立刻响应停止
+                // ROS-2: 速率门控 (fuse 自身已含 read_all sleep, 但防御性兜底)
+                auto elapsed = std::chrono::steady_clock::now() - t0;
+                if (elapsed < kMinCycle) {
+                    std::this_thread::sleep_for(kMinCycle - elapsed);
+                }
             }
             // H5: 通知退出 (供 stop_fusion_thread 带超时等待, 避免 join 挂死)
             {
@@ -97,6 +111,8 @@ public:
         scan_sub_ = this->create_subscription<sensor_msgs::msg::LaserScan>(
             "scan", rclcpp::SensorDataQoS(),
             [this](const sensor_msgs::msg::LaserScan::SharedPtr msg) {
+                // ROS-5 (v2.2): 加锁保护 (原仅靠单线程 executor 隐式串行; 切多线程 executor 会竞争)
+                std::lock_guard<std::mutex> lk(scan_mutex_);
                 scan_ranges_ = msg->ranges;
             });
 
@@ -118,7 +134,8 @@ public:
 private:
     // H5 修复: 若融合线程已卡死在阻塞读 (C1 场景), 无超时 join() 会永久挂起 ->
     // 析构/spin 退出挂死。用带超时的 wait_for 等待退出通知, 超时则 detach 兜底。
-    // R2: 等待提到 2s —— 真机最坏 fuse() 周期 ~490ms, 正常退出远快于 2s; 2s 后仍
+    // R2: 等待提到 2s —— 真机最坏 fuse() 周期 ~135ms (ALG-2 v2.3 校准, 原 ~490ms 偏高),
+    //   正常退出远快于 2s; 2s 后仍
     // 未退说明线程真卡死在阻塞读, detach 概率近乎零。detach 的 UAF 窗口 (线程稍后从
     // 阻塞恢复会访问已析构 this) 因此也缩到仅剩"真卡死 + 进程已开始析构"的极端场景,
     // 由进程退出兜底 (OS 回收线程, 不再访问成员)。
@@ -152,8 +169,8 @@ private:
             // 融合线程一旦静默卡死 (真机 USB 断开 / fuse() 阻塞 / 读传感器挂起),
             // 旧实现会以 5Hz 无限期发布同一份陈旧指令 (fail-unsafe: 上游闸门只判
             // "0.5s 内收到消息" 的链路存活, 无法识别内容过期)。
-            // R1: 阈值 800ms = 真机最坏 fuse() 周期 (~490ms) × ~1.6 裕量 —— 原 500ms
-            // 与上界贴边, 单次调度抖动超 500ms 会触发假性零速 (安全侧但间歇停摆)。
+            // R1: 阈值 800ms ≈ 真机最坏 fuse() 周期 (~135ms, ALG-2 v2.3 校准) × 5.9 裕量 —— 原 500ms
+            //   与旧上界 (~490ms) 贴边, 单次调度抖动超 500ms 会触发假性零速 (安全侧但间歇停摆)。
             auto now = std::chrono::steady_clock::now();
             fresh = (now - last_fusion_update_) <= std::chrono::milliseconds(800);
             if (fresh) {
@@ -170,7 +187,7 @@ private:
         } else {
             cmd.linear = 0.0; cmd.angular = 0.0;
             RCLCPP_WARN_THROTTLE(this->get_logger(), *this->get_clock(), 2000,
-                "融合结果陈旧(>500ms), 发布安全零速 (疑似融合线程卡死)");
+                "融合结果陈旧(>800ms), 发布安全零速 (疑似融合线程卡死)");  // ROS-4 v2.2: 文案与 800ms 阈值对齐
         }
 
         // 3. 发布速度指令 (double -> float 显式窄化, 消除隐式转换警告)
@@ -180,20 +197,27 @@ private:
         cmd_vel_pub_->publish(twist);
 
         // 4. 发布融合结果 (JSON 字符串, 调试/巡检决策)
-        auto msg = std_msgs::msg::String();
-        msg.data = fusion_to_json(result, cmd);
-        fusion_pub_->publish(msg);
+        //    仅 fresh 时发布: 陈旧时 result 是默认空值 (action=FORWARD/min_fwd=8.0), 与零速 cmd 矛盾,
+        //    会误导 /fusion_result 消费者。陈旧由 RCLCPP_WARN_THROTTLE 日志 + 零速 cmd 表达。
+        if (fresh) {
+            auto msg = std_msgs::msg::String();
+            msg.data = fusion_to_json(result, cmd);
+            fusion_pub_->publish(msg);
+        }
 
         // 5. 日志 (5Hz 节流: 每 10 帧打一次, 即每 2 秒)
         if (++tick_ % 10 == 0) {
+            // ROS-5: 加锁读 scan_ranges_ (与 /scan 回调同锁, 不再隐式依赖单线程 executor)
+            size_t scan_n;
+            { std::lock_guard<std::mutex> lk(scan_mutex_); scan_n = scan_ranges_.size(); }
             RCLCPP_INFO(this->get_logger(),
-                "env=%d cliff=%s min_fwd=%.2fm action=%d vel=(%.2f, %.2f) scan=%zu",
-                static_cast<int>(result.environment),
+                "env=%s cliff=%s min_fwd=%.2fm action=%s vel=(%.2f, %.2f) scan=%zu",
+                env_to_str(result.environment),
                 result.cliff_detected ? "YES" : "no",
                 result.min_forward_distance_m,
-                static_cast<int>(result.recommended_action),
+                action_to_str(result.recommended_action),  // ROS-6 v2.2: 枚举改字符串名
                 cmd.linear, cmd.angular,
-                scan_ranges_.size());
+                scan_n);
         }
     }
 
@@ -226,18 +250,40 @@ private:
     bool use_simulated_ = true;
     std::string cmd_vel_topic_ = "/unsafe/cmd_vel";
     unsigned int tick_ = 0;
-    // 注: scan_ranges_ 由 /scan 回调写、timer 回调读, 单线程 executor 下串行安全;
-    //     若改多线程 executor 需加锁
-    std::vector<float> scan_ranges_;  // 雷达数据缓存 (预留)
+    // ROS-5 (v2.2): scan_ranges_ 加显式锁 (原仅靠单线程 executor 隐式串行, 现显式保护)
+    std::mutex scan_mutex_;
+    std::vector<float> scan_ranges_;  // 雷达数据缓存 (预留; /scan 回调写, on_timer 读)
+
+    // ROS-6 (v2.2): 枚举改字符串名 (原 JSON 内嵌 int, 消费者需对照源码枚举值, 易错)
+    static const char* env_to_str(EnvironmentType e) {
+        switch (e) {
+            case EnvironmentType::INDOOR:      return "INDOOR";
+            case EnvironmentType::SEMI_INDOOR:return "SEMI_INDOOR";
+            case EnvironmentType::OUTDOOR:    return "OUTDOOR";
+            default:                          return "UNKNOWN";
+        }
+    }
+    static const char* action_to_str(NavigationAction a) {
+        switch (a) {
+            case NavigationAction::STOP:        return "STOP";
+            case NavigationAction::BACKWARD:     return "BACKWARD";
+            case NavigationAction::TURN_LEFT:    return "TURN_LEFT";
+            case NavigationAction::TURN_RIGHT:   return "TURN_RIGHT";
+            case NavigationAction::SLOW_FORWARD: return "SLOW_FORWARD";
+            case NavigationAction::FORWARD:      return "FORWARD";
+            case NavigationAction::REACHED_GOAL:  return "REACHED_GOAL";
+            default:                             return "UNKNOWN";
+        }
+    }
 
     // 融合结果 -> JSON (供 /fusion_result 调试与巡检决策)
     static std::string fusion_to_json(const FusionResult& r, const VelocityCmd& v) {
         std::ostringstream oss;
         oss << "{\"timestamp\":" << r.timestamp
-            << ",\"environment\":" << static_cast<int>(r.environment)
+            << ",\"environment\":\"" << env_to_str(r.environment) << "\""
             << ",\"cliff\":" << (r.cliff_detected ? "true" : "false")
             << ",\"min_fwd_m\":" << r.min_forward_distance_m
-            << ",\"action\":" << static_cast<int>(r.recommended_action)
+            << ",\"action\":\"" << action_to_str(r.recommended_action) << "\""
             << ",\"astra_w\":" << r.effective_astra_weight
             << ",\"ultra_w\":" << r.effective_ultrasonic_weight
             << ",\"vx\":" << v.linear
@@ -248,7 +294,11 @@ private:
 
 int main(int argc, char** argv) {
     rclcpp::init(argc, argv);
-    rclcpp::spin(std::make_shared<SafetyNode>());
+    // ROS-5 (v2.2): 显式单线程 executor (scan_ranges_ 已加锁, 双重保险; 文档化不依赖隐式串行)
+    rclcpp::executors::SingleThreadedExecutor exec;
+    auto node = std::make_shared<SafetyNode>();
+    exec.add_node(node);
+    exec.spin();
     rclcpp::shutdown();
     return 0;
 }

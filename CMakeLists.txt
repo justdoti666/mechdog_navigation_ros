@@ -12,9 +12,12 @@ if(CMAKE_COMPILER_IS_GNUCXX OR CMAKE_CXX_COMPILER_ID MATCHES "Clang")
 endif()
 
 # 纯算法库源码目录 (上游 mechdog_navigation 仓库, 作为子目录引用)
-set(MECHDOG_ALGO_DIR "${CMAKE_CURRENT_SOURCE_DIR}/../mechdog_navigation")
+# ROS-1 (v2.2): 改为 CACHE PATH 可由 -DMECHDOG_ALGO_DIR=<path> 覆盖;
+# FATAL 守卫已存在 (下方), 仅补可配置性, 解耦同级目录强耦合
+set(MECHDOG_ALGO_DIR "${CMAKE_CURRENT_SOURCE_DIR}/../mechdog_navigation"
+    CACHE PATH "mechdog_navigation 纯算法库源码目录 (可由 -DMECHDOG_ALGO_DIR=<path> 覆盖; 默认同级目录)")
 if(NOT EXISTS "${MECHDOG_ALGO_DIR}/sensor_fusion.cpp")
-  message(FATAL_ERROR "未找到纯算法库源码: ${MECHDOG_ALGO_DIR} (需要与 mechdog_navigation 仓库同级)")
+  message(FATAL_ERROR "未找到纯算法库源码: ${MECHDOG_ALGO_DIR} (需要与 mechdog_navigation 仓库同级, 或传 -DMECHDOG_ALGO_DIR=<path>)")
 endif()
 
 find_package(ament_cmake REQUIRED)
@@ -93,5 +96,15 @@ install(DIRECTORY launch
 )
 # 注: 融合结果以 std_msgs/String (JSON) 发布、节点参数内联在 launch 中 (FIX-16/ROS-6),
 #     已删除无消费方的 msg/FusionResult.msg 与 config/safety_params.yaml
+
+# ROS-10 (v2.2): lint + smoke test (chassis_bridge.hpp 是纯 C++ 头, smoke 验证链接+构造)
+if(BUILD_TESTING)
+  find_package(ament_lint_auto REQUIRED)
+  ament_lint_auto_find_test_dependencies()
+  find_package(ament_cmake_gtest REQUIRED)
+  ament_add_gtest(test_smoke test/test_smoke.cpp)
+  target_include_directories(test_smoke PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
+  target_compile_features(test_smoke PRIVATE cxx_std_20)
+endif()
 
 ament_package()

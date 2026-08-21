@@ -6,7 +6,7 @@
 
 | 库 | 位置 | 职责 |
 |---|---|---|
-| **mechdog_navigation** | 本包同级 `../mechdog_navigation/` | 纯算法库（C++17，无 ROS2 依赖）：SensorFusion 多传感器融合（Astra 深度 + 4×HC-SR04 超声 + 红外环境）、PathPlanner 速度决策 |
+| **mechdog_navigation** | 本包同级 `../mechdog_navigation/` | 纯算法库（C++20，无 ROS2 依赖）：SensorFusion 多传感器融合（Astra 深度 + 4×HC-SR04 超声 + 红外环境）、PathPlanner 速度决策 |
 | **mechdog_navigation_ros**（本包） | 任意 | 局部安全层 ROS2 节点：融合 → 规划 → 发布速度指令到安全闸门输入 |
 | **quadruped_ws** | 全局层：Nav2 导航、cartographer/AMCL 建图定位、lidar 避障、语音/云台/热成像、双层速度闸门、STM32H723 串口底盘桥 |
 

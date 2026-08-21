@@ -1,0 +1,28 @@
+# ROS-7 (v2.2): 构建产物与 IDE 文件忽略
+# colcon / CMake 构建目录
+build/
+install/
+log/
+build_real/
+
+# 编译产物 (含误入 src 的 *.obj/*.exe)
+*.obj
+*.o
+*.a
+*.so
+*.exe
+*.pdb
+
+# CMake 中间
+CMakeCache.txt
+CMakeFiles/
+cmake_install.cmake
+
+# IDE
+.vs/
+.vscode/
+.cache/
+
+# Python (launch 缓存)
+__pycache__/
+*.pyc
