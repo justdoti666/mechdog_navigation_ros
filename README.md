@@ -87,6 +87,7 @@ ros2 launch mechdog_navigation_ros safety.launch.py use_simulated:=false
 - **安全闸门**：本包发布 `/unsafe/cmd_vel`，由 `cmd_vel_safety_gate_node` 统一安全检查（estop/超时/限幅）后转发 `/cmd_vel`。若想绕过闸门直发（仅测试）：`--ros-args -p cmd_vel_topic:=/cmd_vel`。
 - **底盘通信**：`chassis_bridge_node` 订阅 `/cmd_vel`。默认 `bridge_type:=simulated`；真机 `bridge_type:=stm32` 时本包直接串口发 21 字节帧（协议同师兄）。**联调默认让 `wheel_board_bridge_node` 管串口，本包保持 simulated**，避免双写。
 - **ROS2 版本**：本包按 Jazzy（Ubuntu 24.04）写法；若环境是 Humble（22.04），代码无需改，仅构建环境不同。
+- **rgb_stream 安全**：`rgb_stream` 是无鉴权调试服务，绑定 `0.0.0.0`，局域网内任何设备都可查看摄像头画面与距离数据。仅限可信局域网调试使用，不要暴露到公网；如需长期运行建议改绑 `127.0.0.1`（改 `main` 中 `addr.sin_addr.s_addr`）或加反向代理鉴权。
 - **速度仲裁**：当前 safety_node 直接发布自己的规划结果。接入 Nav2 后，建议将 Nav2 输出作为闸门输入的另一个发布者（师兄闸门天然支持多输入），本层仅在检测到悬崖/近距障碍时覆盖输出。
 - **传感器真机化**：当前算法库内部走模拟数据；真机接入时需为 Astra/超声/光强各写 ROS2 驱动节点（或直接改算法库驱动层）。
 

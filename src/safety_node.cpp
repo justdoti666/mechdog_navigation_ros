@@ -22,6 +22,7 @@
  */
 #include <chrono>
 #include <condition_variable>
+#include <iomanip>
 #include <memory>
 #include <sstream>
 #include <string>
@@ -190,10 +191,11 @@ private:
                 "融合结果陈旧(>800ms), 发布安全零速 (疑似融合线程卡死)");  // ROS-4 v2.2: 文案与 800ms 阈值对齐
         }
 
-        // 3. 发布速度指令 (double -> float 显式窄化, 消除隐式转换警告)
+        // 3. 发布速度指令 (geometry_msgs Twist 字段为 float64, 直接赋值即可;
+        //    原先的 static_cast<float> 反而引入无谓的 float32 精度损失)
         auto twist = geometry_msgs::msg::Twist();
-        twist.linear.x = static_cast<float>(cmd.linear);
-        twist.angular.z = static_cast<float>(cmd.angular);
+        twist.linear.x = cmd.linear;
+        twist.angular.z = cmd.angular;
         cmd_vel_pub_->publish(twist);
 
         // 4. 发布融合结果 (JSON 字符串, 调试/巡检决策)
@@ -279,7 +281,10 @@ private:
     // 融合结果 -> JSON (供 /fusion_result 调试与巡检决策)
     static std::string fusion_to_json(const FusionResult& r, const VelocityCmd& v) {
         std::ostringstream oss;
-        oss << "{\"timestamp\":" << r.timestamp
+        // P3: 默认 6 位有效数字会把 epoch 秒 (~1.79e9) 截到小时级分辨率 (实测 1.78793e+09);
+        //     统一 fixed(3): 时间戳毫秒级, 其余数值字段三位小数 (m/s / rad/s 分辨率足够)
+        oss << std::fixed << std::setprecision(3)
+            << "{\"timestamp\":" << r.timestamp
             << ",\"environment\":\"" << env_to_str(r.environment) << "\""
             << ",\"cliff\":" << (r.cliff_detected ? "true" : "false")
             << ",\"min_fwd_m\":" << r.min_forward_distance_m
