@@ -17,6 +17,7 @@
 from launch import LaunchDescription
 from launch_ros.actions import Node
 from launch.actions import DeclareLaunchArgument
+from launch.conditions import IfCondition
 from launch.substitutions import LaunchConfiguration
 
 
@@ -32,6 +33,19 @@ def generate_launch_description():
             'cmd_vel_topic', default_value='/unsafe/cmd_vel',
             description='速度指令发布话题 (默认 /unsafe/cmd_vel 走师兄安全闸门; '
                         '测试直连链路可设 /cmd_vel, 绕过闸门仅限测试)'),
+        DeclareLaunchArgument(
+            'enable_pointcloud', default_value='false',
+            description='近场点云: safety_node 发布深度点云到 /mechdog/point_cloud '
+                        '(camera_link 系, 供 Nav2 voxel_layer 标记悬空/立体障碍)'),
+        DeclareLaunchArgument(
+            'camera_x', default_value='0.12',
+            description='相机相对 base_link: 前 (m, 外参占位值, 装机后量测)'),
+        DeclareLaunchArgument(
+            'camera_z', default_value='0.18',
+            description='相机相对 base_link: 高 (m)'),
+        DeclareLaunchArgument(
+            'camera_pitch_rad', default_value='0.2617994',
+            description='相机俯仰 (rad, +15° 前俯, 与算法库 CameraExtrinsics 默认一致)'),
         Node(
             package='mechdog_navigation_ros',
             executable='safety_node',
@@ -40,7 +54,29 @@ def generate_launch_description():
             parameters=[{
                 'use_simulated': LaunchConfiguration('use_simulated'),
                 'cmd_vel_topic': LaunchConfiguration('cmd_vel_topic'),
+                'enable_pointcloud': LaunchConfiguration('enable_pointcloud'),
             }],
+        ),
+        # 近场点云坐标: base_link -> camera_link 静态变换 (roll/pitch/yaw 弧度;
+        # 与算法库 CameraExtrinsics 默认值一致, 外参标定后同步更新).
+        # 注意: 必须用键值对形式 —— Iron 起 static_transform_publisher 位置参数已弃用,
+        # lyrical 上位置参数直接解析失败 (Frame id must not be empty), 真机实测踩过.
+        Node(
+            package='tf2_ros',
+            executable='static_transform_publisher',
+            name='camera_tf_publisher',
+            output='screen',
+            condition=IfCondition(LaunchConfiguration('enable_pointcloud')),
+            arguments=[
+                '--x', LaunchConfiguration('camera_x'),
+                '--y', '0.0',
+                '--z', LaunchConfiguration('camera_z'),
+                '--roll', '0.0',
+                '--pitch', LaunchConfiguration('camera_pitch_rad'),
+                '--yaw', '0.0',
+                '--frame-id', 'base_link',
+                '--child-frame-id', 'camera_link',
+            ],
         ),
         Node(
             package='mechdog_navigation_ros',

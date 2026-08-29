@@ -40,6 +40,7 @@ add_library(mechdog_algo OBJECT
   ${MECHDOG_ALGO_DIR}/sensor_ir.cpp
   ${MECHDOG_ALGO_DIR}/sensor_fusion.cpp
   ${MECHDOG_ALGO_DIR}/path_planner.cpp
+  ${MECHDOG_ALGO_DIR}/point_cloud.cpp
 )
 target_include_directories(mechdog_algo PRIVATE ${MECHDOG_ALGO_DIR})
 target_compile_features(mechdog_algo PRIVATE cxx_std_20)

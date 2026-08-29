@@ -17,6 +17,8 @@
 
   <exec_depend>launch</exec_depend>
   <exec_depend>launch_ros</exec_depend>
+  <!-- 近场点云: launch 里 static_transform_publisher 发 base_link -> camera_link -->
+  <exec_depend>tf2_ros</exec_depend>
 
   <!-- ROS-10 (v2.2): 测试依赖 (lint + gtest smoke test) -->
   <test_depend>ament_lint_auto</test_depend>

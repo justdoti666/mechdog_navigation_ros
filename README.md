@@ -81,6 +81,7 @@ ros2 launch mechdog_navigation_ros safety.launch.py use_simulated:=false
 | `/cmd_vel` | geometry_msgs/Twist | 订阅 | chassis_bridge_node 消费, 发送到底盘（wheel_board_bridge 或本包 stm32 桥） |
 | `/fusion_result` | std_msgs/String (JSON) | 发布 | 融合结果 JSON（环境/悬崖/前方距离/动作/权重/速度） |
 | `/scan` | sensor_msgs/LaserScan | 订阅 | 雷达（sensor_data QoS, 当前缓存预留, 不参与融合） |
+| `/mechdog/point_cloud` | sensor_msgs/PointCloud2 | 发布 | 近场深度点云（`camera_link` 系, `enable_pointcloud:=true` 启用, 默认关） |
 
 ## 对接注意
 
@@ -91,6 +92,48 @@ ros2 launch mechdog_navigation_ros safety.launch.py use_simulated:=false
 - **速度仲裁**：当前 safety_node 直接发布自己的规划结果。接入 Nav2 后，建议将 Nav2 输出作为闸门输入的另一个发布者（师兄闸门天然支持多输入），本层仅在检测到悬崖/近距障碍时覆盖输出。
 - **传感器真机化**：当前算法库内部走模拟数据；真机接入时需为 Astra/超声/光强各写 ROS2 驱动节点（或直接改算法库驱动层）。
 - **前向全盲行为（接真机前必读）**：算法库在前向三方向全部失效（镜头被挡 + 三颗前向超声全坏）时输出 `SLOW_FORWARD` 降速盲行（仅 bottom 悬崖兜底），**不是 STOP**。接机械狗前务必与师兄闸门确认该场景有叠加保护；若本层是最后防线，按 mechdog_navigation README「已知限制」#7 把该分支改为 `STOP`。
+
+## 近场点云（P3 起步）
+
+**定位**：本包做**近场 3D 感知，补充激光雷达 2D 的盲区**（悬空障碍如桌沿、障碍物立体高度、悬崖边缘唇口）；全局建图定位归师兄栈（cartographer/AMCL + 激光雷达），本包不做地图、不碰 `map/odom`，全部在 `base_link` 局部系。
+
+```bash
+ros2 launch mechdog_navigation_ros safety.launch.py enable_pointcloud:=true
+```
+
+- 点云链路：深度图 → `depth_to_cloud` 反投影（0.6~8.0m 有效口径）→ `transform_optical_to_link` 固定旋转 → 每 N 点取 1 降采样 → 发布 `PointCloud2`（`enable_pointcloud` 默认 `false`，开启后行为不变只多一点云）
+- 发布频率跟随融合节拍（真机 ~9-12Hz），话题 `/mechdog/point_cloud`，坐标系 `camera_link`（REP-103：X 前 Y 左 Z 上）
+- launch 会同时启动 `static_transform_publisher`（`base_link → camera_link`，默认外参 x=0.12 / z=0.18 / pitch=+15°，**装机标定后用 `camera_x/camera_z/camera_pitch_rad` 覆盖**）
+- 参数：`cloud_topic` / `cloud_frame` / `cloud_downsample_step`（默认 8，Pi 上算力紧可加大）
+
+**师兄 Nav2 接入**（local_costmap 加一个 voxel 层即可消费）：
+
+```yaml
+voxel_layer:
+  plugin: "nav2_costmap_2d::VoxelLayer"
+  enabled: true
+  origin_z: -0.2            # 相机装高 18cm, 地面以下(悬崖唇口)也要能标
+  z_resolution: 0.05
+  z_voxels: 16
+  publish_voxel_map: true
+  mark_threshold: 0
+  observation_sources: pointcloud
+  pointcloud:
+    topic: /mechdog/point_cloud
+    sensor_frame: camera_link
+    data_type: "PointCloud2"
+    expected_update_rate: 0.5   # 秒; 融合线程 ~9-12Hz, 0.5s 没更新即视为失效
+    obstruction_max_range: 2.5  # 近场定位: 超过 2.5m 交给激光雷达
+    raytrace_max_range: 3.0
+    marking: true
+    clearing: true
+```
+
+**注意**：
+
+- **相机单进程独占**：safety_node 内部直接开 Astra（`use_simulated:=false` 时），不要再起第二个读相机的节点/程序，否则后开者 serial 为空、深度全失效（真机实测过）。点云跟着融合线程走正是为此。
+- voxel_layer 标的是"有点的位置"：桌沿、立体障碍、**悬崖边缘唇口**都能标；整片"该有地面而没有"的负障碍（坑/下行楼梯）要等 P1 地面分割显式输出负障碍标记，这是近场模块的下一步。
+
 
 ## 状态
 

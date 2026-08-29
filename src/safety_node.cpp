@@ -34,6 +34,7 @@
 #include "rclcpp/executors/single_threaded_executor.hpp"  // ROS-5: main 用 SingleThreadedExecutor (显式 include, 不依赖聚合头传递)
 #include "geometry_msgs/msg/twist.hpp"
 #include "sensor_msgs/msg/laser_scan.hpp"
+#include "sensor_msgs/msg/point_cloud2.hpp"
 #include "std_msgs/msg/string.hpp"
 
 // 纯算法库
@@ -42,6 +43,7 @@
 #include "sensor_ir.h"
 #include "sensor_fusion.h"
 #include "path_planner.h"
+#include "point_cloud.h"
 
 using namespace mechdog;
 using namespace std::chrono_literals;
@@ -55,6 +57,15 @@ public:
         //       订阅 /unsafe/cmd_vel 作为闸门输入, 经安全检查后转发到 /cmd_vel;
         //       直接发 /cmd_vel 会绕过师兄的安全闸门, 违反安全分层)
         cmd_vel_topic_ = this->declare_parameter("cmd_vel_topic", "/unsafe/cmd_vel");
+
+        // ---- 近场点云 (P3 起步): 深度帧反投影 -> camera_link 系 PointCloud2 ----
+        // 定位: 近场局部 3D 感知, 喂 Nav2 voxel_layer 做悬空/立体障碍标记; 全局建图归师兄激光雷达.
+        // 默认关 (行为不变); 真机注意本节点已独占相机, 勿再开第二个 Astra 进程 (serial 为空, 深度全失效).
+        enable_pointcloud_ = this->declare_parameter("enable_pointcloud", false);
+        cloud_topic_ = this->declare_parameter("cloud_topic", "/mechdog/point_cloud");
+        cloud_frame_ = this->declare_parameter("cloud_frame", "camera_link");
+        cloud_step_ = std::max(1, static_cast<int>(
+            this->declare_parameter("cloud_downsample_step", 8)));
 
         // ---- 初始化算法库 ----
         astra_ = std::make_unique<AstraProDriver>(use_simulated_);
@@ -89,6 +100,10 @@ public:
                     have_result_ = true;
                     last_fusion_update_ = std::chrono::steady_clock::now();
                 }
+                // 近场点云: 跟随融合节拍发布 (融合线程独占相机读取; rclcpp publish 线程安全)
+                if (cloud_pub_) {
+                    publish_pointcloud();
+                }
                 // ROS-2: 速率门控 (fuse 自身已含 read_all sleep, 但防御性兜底)
                 auto elapsed = std::chrono::steady_clock::now() - t0;
                 if (elapsed < kMinCycle) {
@@ -106,6 +121,13 @@ public:
         // ---- ROS2 接口 ----
         cmd_vel_pub_ = this->create_publisher<geometry_msgs::msg::Twist>(cmd_vel_topic_, 10);
         fusion_pub_ = this->create_publisher<std_msgs::msg::String>("fusion_result", 10);
+        if (enable_pointcloud_) {
+            cloud_pub_ = this->create_publisher<sensor_msgs::msg::PointCloud2>(cloud_topic_, 5);
+            RCLCPP_INFO(this->get_logger(),
+                "近场点云已启用: topic=%s frame=%s 下采样步长=%d (配合 static TF %s -> base_link)",
+                cloud_topic_.c_str(), cloud_frame_.c_str(), cloud_step_,
+                cloud_frame_.c_str());
+        }
 
         // 订阅师兄雷达 (可选, 当前仅记录日志)
         // QoS: sensor_data —— 与师兄 lidar_obstacle_node 一致 (rplidar_ros 发布 /scan 用 sensor_data)
@@ -156,6 +178,53 @@ private:
             }
         }
         if (fusion_thread_.joinable()) fusion_thread_.join();
+    }
+
+    // 近场点云 (P3 起步): 深度帧反投影 -> camera_link 系降采样 PointCloud2.
+    // 由融合线程调用 (独占相机读取, 无跨线程共享, 无需加锁); rclcpp publish 线程安全.
+    // stamp 用发布时刻 (静态 TF 对任意时刻有效, Nav2 voxel_layer 按"最新观测"消费).
+    void publish_pointcloud() {
+        AstraFrame frame = astra_->get_latest_frame();
+        if (!frame.valid || frame.depth_map.empty() ||
+            frame.depth_width <= 0 || frame.depth_height <= 0) {
+            return;  // 首帧未就绪 / 真机帧失效 (H1 同口径)
+        }
+        PointCloud cloud_opt, cloud_link;
+        depth_to_cloud(frame.depth_map.data(), frame.depth_width,
+                       frame.depth_height, cloud_K_, cloud_opt);
+        transform_optical_to_link(cloud_opt, cloud_link);
+
+        // 降采样 + 序列化: x/y/z float32 + 4 字节 padding, point_step=16
+        const size_t total = cloud_link.points.size();
+        const size_t step = static_cast<size_t>(cloud_step_);
+        std::vector<uint8_t> buf;
+        buf.reserve((total / step + 1) * 16);
+        for (size_t i = 0; i < total; i += step) {
+            const auto& p = cloud_link.points[i];
+            const float xyz[4] = {static_cast<float>(p.x), static_cast<float>(p.y),
+                                  static_cast<float>(p.z), 0.0f};
+            const auto* bytes = reinterpret_cast<const uint8_t*>(xyz);
+            buf.insert(buf.end(), bytes, bytes + sizeof(xyz));
+        }
+        if (buf.empty()) return;
+
+        sensor_msgs::msg::PointCloud2 msg;
+        msg.header.stamp = this->now();
+        msg.header.frame_id = cloud_frame_;
+        msg.height = 1;
+        msg.width = static_cast<uint32_t>(buf.size() / 16);
+        msg.is_dense = true;       // depth_to_cloud 已按 [0.6, 8.0]m 过滤无效像素
+        msg.is_bigendian = false;
+        msg.point_step = 16;
+        msg.row_step = msg.point_step * msg.width;
+        sensor_msgs::msg::PointField field;
+        field.datatype = sensor_msgs::msg::PointField::FLOAT32;
+        field.count = 1;
+        field.name = "x"; field.offset = 0; msg.fields.push_back(field);
+        field.name = "y"; field.offset = 4; msg.fields.push_back(field);
+        field.name = "z"; field.offset = 8; msg.fields.push_back(field);
+        msg.data = std::move(buf);
+        cloud_pub_->publish(msg);
     }
 
     void on_timer() {
@@ -246,6 +315,7 @@ private:
     // ROS2 接口
     rclcpp::Publisher<geometry_msgs::msg::Twist>::SharedPtr cmd_vel_pub_;
     rclcpp::Publisher<std_msgs::msg::String>::SharedPtr fusion_pub_;
+    rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr cloud_pub_;
     rclcpp::Subscription<sensor_msgs::msg::LaserScan>::SharedPtr scan_sub_;
     rclcpp::TimerBase::SharedPtr timer_;
 
@@ -255,6 +325,13 @@ private:
     // ROS-5 (v2.2): scan_ranges_ 加显式锁 (原仅靠单线程 executor 隐式串行, 现显式保护)
     std::mutex scan_mutex_;
     std::vector<float> scan_ranges_;  // 雷达数据缓存 (预留; /scan 回调写, on_timer 读)
+
+    // 近场点云 (P3): 参数 + 内参 (FOV 反推, 真机标定后改 SDK 直读, 见设计文档 §3.2)
+    bool enable_pointcloud_ = false;
+    std::string cloud_topic_ = "/mechdog/point_cloud";
+    std::string cloud_frame_ = "camera_link";
+    int cloud_step_ = 8;
+    CameraIntrinsics cloud_K_;
 
     // ROS-6 (v2.2): 枚举改字符串名 (原 JSON 内嵌 int, 消费者需对照源码枚举值, 易错)
     static const char* env_to_str(EnvironmentType e) {
