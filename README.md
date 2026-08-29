@@ -90,6 +90,7 @@ ros2 launch mechdog_navigation_ros safety.launch.py use_simulated:=false
 - **rgb_stream 安全**：`rgb_stream` 是无鉴权调试服务，绑定 `0.0.0.0`，局域网内任何设备都可查看摄像头画面与距离数据。仅限可信局域网调试使用，不要暴露到公网；如需长期运行建议改绑 `127.0.0.1`（改 `main` 中 `addr.sin_addr.s_addr`）或加反向代理鉴权。
 - **速度仲裁**：当前 safety_node 直接发布自己的规划结果。接入 Nav2 后，建议将 Nav2 输出作为闸门输入的另一个发布者（师兄闸门天然支持多输入），本层仅在检测到悬崖/近距障碍时覆盖输出。
 - **传感器真机化**：当前算法库内部走模拟数据；真机接入时需为 Astra/超声/光强各写 ROS2 驱动节点（或直接改算法库驱动层）。
+- **前向全盲行为（接真机前必读）**：算法库在前向三方向全部失效（镜头被挡 + 三颗前向超声全坏）时输出 `SLOW_FORWARD` 降速盲行（仅 bottom 悬崖兜底），**不是 STOP**。接机械狗前务必与师兄闸门确认该场景有叠加保护；若本层是最后防线，按 mechdog_navigation README「已知限制」#7 把该分支改为 `STOP`。
 
 ## 状态
 
@@ -99,4 +100,5 @@ ros2 launch mechdog_navigation_ros safety.launch.py use_simulated:=false
 - [ ] ROS2 版本确认
 - [ ] 真机传感器节点（Astra SDK / HC-SR04 libgpiod）
 - [ ] Stm32ChassisBridge 串口实机联调（协议已实现, 待硬件验证）
+- [ ] 真机部署前：确认前向全盲 `SLOW_FORWARD` 策略与全局闸门的兜底关系（mechdog_navigation README「已知限制」#7）
 - [ ] Nav2 速度仲裁接入
