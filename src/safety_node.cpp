@@ -35,6 +35,7 @@
 #include "geometry_msgs/msg/twist.hpp"
 #include "sensor_msgs/msg/laser_scan.hpp"
 #include "sensor_msgs/msg/point_cloud2.hpp"
+#include "sensor_msgs/msg/image.hpp"
 #include "std_msgs/msg/string.hpp"
 
 // 纯算法库
@@ -66,6 +67,15 @@ public:
         cloud_frame_ = this->declare_parameter("cloud_frame", "camera_link");
         cloud_step_ = std::max(1, static_cast<int>(
             this->declare_parameter("cloud_downsample_step", 8)));
+
+        // ---- RGB 回传 (替代支架相机/USB 相机): Astra RGB -> sensor_msgs/Image ----
+        // 师兄的温度-视觉验证与 Foxglove 回传直接换图像源即可; Foxglove bridge 自带压缩.
+        // 注意: Astra RGB 仅真机模式有数据 (模拟模式 get_color_frame 返回无效), 但参数照常生效.
+        enable_rgb_ = this->declare_parameter("enable_rgb", false);
+        rgb_topic_ = this->declare_parameter("rgb_topic", "/mechdog/rgb/image_raw");
+        rgb_frame_ = this->declare_parameter("rgb_frame", "camera_link");
+        rgb_fps_ = std::max(1, static_cast<int>(
+            this->declare_parameter("rgb_fps", 10)));
 
         // ---- 初始化算法库 ----
         astra_ = std::make_unique<AstraProDriver>(use_simulated_);
@@ -104,6 +114,10 @@ public:
                 if (cloud_pub_) {
                     publish_pointcloud();
                 }
+                // RGB 回传: 节流到目标帧率后发布 Astra 彩色帧 (同一驱动实例, 免抢相机)
+                if (rgb_pub_) {
+                    publish_rgb_if_due();
+                }
                 // ROS-2: 速率门控 (fuse 自身已含 read_all sleep, 但防御性兜底)
                 auto elapsed = std::chrono::steady_clock::now() - t0;
                 if (elapsed < kMinCycle) {
@@ -127,6 +141,12 @@ public:
                 "近场点云已启用: topic=%s frame=%s 下采样步长=%d (配合 static TF %s -> base_link)",
                 cloud_topic_.c_str(), cloud_frame_.c_str(), cloud_step_,
                 cloud_frame_.c_str());
+        }
+        if (enable_rgb_) {
+            rgb_pub_ = this->create_publisher<sensor_msgs::msg::Image>(rgb_topic_, 5);
+            RCLCPP_INFO(this->get_logger(),
+                "RGB 回传已启用: topic=%s frame=%s 目标帧率=%dfps (真机模式出图, 模拟模式无彩色帧)",
+                rgb_topic_.c_str(), rgb_frame_.c_str(), rgb_fps_);
         }
 
         // 订阅师兄雷达 (可选, 当前仅记录日志)
@@ -227,6 +247,33 @@ private:
         cloud_pub_->publish(msg);
     }
 
+    // RGB 回传: Astra 彩色帧缓存 -> sensor_msgs/Image (rgb8). 按 rgb_fps 节流;
+    // 真机模式 get_color_frame 返回窗口线程同款彩色缓存, 模拟模式无彩色数据 (跳过).
+    void publish_rgb_if_due() {
+        auto now = std::chrono::steady_clock::now();
+        const auto min_interval =
+            std::chrono::duration<double>(1.0 / static_cast<double>(rgb_fps_));
+        if (last_rgb_pub_.time_since_epoch().count() != 0 &&
+            now - last_rgb_pub_ < min_interval) {
+            return;
+        }
+        ColorFrameData cf = astra_->get_color_frame();
+        if (!cf.valid || cf.rgb.empty() || cf.width <= 0 || cf.height <= 0) {
+            return;  // 模拟模式 / 彩色流未就绪
+        }
+        sensor_msgs::msg::Image msg;
+        msg.header.stamp = this->now();
+        msg.header.frame_id = rgb_frame_;
+        msg.height = static_cast<uint32_t>(cf.height);
+        msg.width = static_cast<uint32_t>(cf.width);
+        msg.encoding = "rgb8";
+        msg.is_bigendian = false;
+        msg.step = static_cast<uint32_t>(cf.width) * 3;
+        msg.data = std::move(cf.rgb);
+        rgb_pub_->publish(std::move(msg));
+        last_rgb_pub_ = now;
+    }
+
     void on_timer() {
         // 1. 取最新融合结果 (融合线程写, 本回调读, 锁保护)
         FusionResult result;
@@ -316,6 +363,7 @@ private:
     rclcpp::Publisher<geometry_msgs::msg::Twist>::SharedPtr cmd_vel_pub_;
     rclcpp::Publisher<std_msgs::msg::String>::SharedPtr fusion_pub_;
     rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr cloud_pub_;
+    rclcpp::Publisher<sensor_msgs::msg::Image>::SharedPtr rgb_pub_;
     rclcpp::Subscription<sensor_msgs::msg::LaserScan>::SharedPtr scan_sub_;
     rclcpp::TimerBase::SharedPtr timer_;
 
@@ -332,6 +380,13 @@ private:
     std::string cloud_frame_ = "camera_link";
     int cloud_step_ = 8;
     CameraIntrinsics cloud_K_;
+
+    // RGB 回传 (替代支架相机): 参数 + 发布节流状态 (仅融合线程访问, 无需锁)
+    bool enable_rgb_ = false;
+    std::string rgb_topic_ = "/mechdog/rgb/image_raw";
+    std::string rgb_frame_ = "camera_link";
+    int rgb_fps_ = 10;
+    std::chrono::steady_clock::time_point last_rgb_pub_{};
 
     // ROS-6 (v2.2): 枚举改字符串名 (原 JSON 内嵌 int, 消费者需对照源码枚举值, 易错)
     static const char* env_to_str(EnvironmentType e) {

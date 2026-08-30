@@ -46,6 +46,10 @@ def generate_launch_description():
         DeclareLaunchArgument(
             'camera_pitch_rad', default_value='0.2617994',
             description='相机俯仰 (rad, +15° 前俯, 与算法库 CameraExtrinsics 默认一致)'),
+        DeclareLaunchArgument(
+            'enable_rgb', default_value='false',
+            description='RGB 回传: safety_node 发布 Astra 彩色帧到 /mechdog/rgb/image_raw '
+                        '(替代支架相机/USB 相机, 供温度-视觉验证与 Foxglove 回传; 真机出图)'),
         Node(
             package='mechdog_navigation_ros',
             executable='safety_node',
@@ -55,6 +59,7 @@ def generate_launch_description():
                 'use_simulated': LaunchConfiguration('use_simulated'),
                 'cmd_vel_topic': LaunchConfiguration('cmd_vel_topic'),
                 'enable_pointcloud': LaunchConfiguration('enable_pointcloud'),
+                'enable_rgb': LaunchConfiguration('enable_rgb'),
             }],
         ),
         # 近场点云坐标: base_link -> camera_link 静态变换 (roll/pitch/yaw 弧度;

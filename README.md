@@ -82,6 +82,7 @@ ros2 launch mechdog_navigation_ros safety.launch.py use_simulated:=false
 | `/fusion_result` | std_msgs/String (JSON) | 发布 | 融合结果 JSON（环境/悬崖/前方距离/动作/权重/速度） |
 | `/scan` | sensor_msgs/LaserScan | 订阅 | 雷达（sensor_data QoS, 当前缓存预留, 不参与融合） |
 | `/mechdog/point_cloud` | sensor_msgs/PointCloud2 | 发布 | 近场深度点云（`camera_link` 系, `enable_pointcloud:=true` 启用, 默认关） |
+| `/mechdog/rgb/image_raw` | sensor_msgs/Image (rgb8) | 发布 | Astra 彩色帧（`enable_rgb:=true` 启用, 默认关；真机出图，默认 10fps，Foxglove bridge 自带压缩） |
 
 ## 对接注意
 
@@ -133,6 +134,22 @@ voxel_layer:
 
 - **相机单进程独占**：safety_node 内部直接开 Astra（`use_simulated:=false` 时），不要再起第二个读相机的节点/程序，否则后开者 serial 为空、深度全失效（真机实测过）。点云跟着融合线程走正是为此。
 - voxel_layer 标的是"有点的位置"：桌沿、立体障碍、**悬崖边缘唇口**都能标；整片"该有地面而没有"的负障碍（坑/下行楼梯）要等 P1 地面分割显式输出负障碍标记，这是近场模块的下一步。
+
+## RGB 回传整合（替代支架相机）
+
+原支架上的可见光相机由 Astra Pro 的 RGB 一并承担（云台未落实，相机与 Astra 均为固定朝前，无视野损失），支架上仅保留红外热成像。整合动机：
+
+- 减一颗相机：少一路 CSI/USB 占用、少一份供电与支架布局
+- **RGB 与深度同源**：同一台 Astra 出的彩色与点云天然空间对齐，师兄的"温度-视觉"双重验证可升级为**温度-视觉-距离三重**（热成像报高温目标，点云直接给距离与高度）
+- **全黑可用**：浓烟/黑暗下 RGB 失效，但结构光深度是主动投射，近场避障与点云仍工作
+
+```bash
+ros2 launch mechdog_navigation_ros safety.launch.py use_simulated:=false enable_rgb:=true enable_pointcloud:=true
+```
+
+- 话题 `/mechdog/rgb/image_raw`（sensor_msgs/Image, rgb8, 默认 10fps，`rgb_fps` 可调；Foxglove bridge 链路自带压缩，带宽无忧）
+- 仅真机模式出图（模拟模式无彩色帧，参数开启不报错）
+- 师兄侧改动：视觉源从支架相机话题切到本话题即可，"温度-视觉"管线本身不动
 
 
 ## 状态
