@@ -82,6 +82,7 @@ ros2 launch mechdog_navigation_ros safety.launch.py use_simulated:=false
 | `/fusion_result` | std_msgs/String (JSON) | 发布 | 融合结果 JSON（环境/悬崖/前方距离/动作/权重/速度） |
 | `/scan` | sensor_msgs/LaserScan | 订阅 | 雷达（sensor_data QoS, 当前缓存预留, 不参与融合） |
 | `/mechdog/point_cloud` | sensor_msgs/PointCloud2 | 发布 | 近场深度点云（`camera_link` 系, `enable_pointcloud:=true` 启用, 默认关） |
+| `/mechdog/negative_obstacles` | sensor_msgs/PointCloud2 | 发布 | **负障碍标记点**（`base_link` 系地面高度处, P1 地面分割检出坑/下行台阶; 跟随 `enable_pointcloud`） |
 | `/mechdog/rgb/image_raw` | sensor_msgs/Image (rgb8) | 发布 | Astra 彩色帧（`enable_rgb:=true` 启用, 默认关；真机出图，默认 10fps，Foxglove bridge 自带压缩） |
 
 ## 对接注意
@@ -133,7 +134,15 @@ voxel_layer:
 **注意**：
 
 - **相机单进程独占**：safety_node 内部直接开 Astra（`use_simulated:=false` 时），不要再起第二个读相机的节点/程序，否则后开者 serial 为空、深度全失效（真机实测过）。点云跟着融合线程走正是为此。
-- voxel_layer 标的是"有点的位置"：桌沿、立体障碍、**悬崖边缘唇口**都能标；整片"该有地面而没有"的负障碍（坑/下行楼梯）要等 P1 地面分割显式输出负障碍标记，这是近场模块的下一步。
+- voxel_layer 标的是"有点的位置"：桌沿、立体障碍、**悬崖边缘唇口**都能标；整片"该有地面而没有"的负障碍（坑/下行楼梯）由 **P1 地面分割**输出到 `/mechdog/negative_obstacles`。
+
+### 负障碍检测（P1）
+
+- 原理：base_link 系受约束 RANSAC 拟合地面平面（高度先验带 + 法向竖直约束，防把墙当地面）→ 逐点分类 → 2.5D 栅格按列扫描，判据为**"地面 → 无回波带 → 更低一截"**；门口/Free space 后方地面同高则不标（单测 T4 试金石锁定）
+- 话题：`/mechdog/negative_obstacles`（`base_link` 系，标记点位于地面平面高度）。建议师兄 costmap 给它单独一个 observation source 且 **`clearing: false`**——坑的标记不该被后续地面射线清掉
+- 阈值：`cliff_drop_min = 0.12m`（mechdog_navigation `GroundSegConfig`；底部 HC-SR04 的 30cm 是紧急兜底阈值，两者语义不同勿混用）
+- **fail-closed**：平面拟合失败（镜头没对着地面/外参不对）→ 不输出负障碍、真机模式 10s 节流告警；模拟模式数据是纯墙面，恒无负障碍属预期
+- 依赖外参：`ground_prior_z = -0.18` 与 `CameraExtrinsics` 联动，装机量测后**两处同步改**
 
 ## RGB 回传整合（替代支架相机）
 

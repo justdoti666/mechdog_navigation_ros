@@ -45,6 +45,7 @@
 #include "sensor_fusion.h"
 #include "path_planner.h"
 #include "point_cloud.h"
+#include "ground_segmentation.h"
 
 using namespace mechdog;
 using namespace std::chrono_literals;
@@ -67,6 +68,8 @@ public:
         cloud_frame_ = this->declare_parameter("cloud_frame", "camera_link");
         cloud_step_ = std::max(1, static_cast<int>(
             this->declare_parameter("cloud_downsample_step", 8)));
+        // 负障碍话题 (P1): base_link 系坑/下行台阶标记点, 跟随 enable_pointcloud 开关
+        neg_topic_ = this->declare_parameter("negative_topic", "/mechdog/negative_obstacles");
 
         // ---- RGB 回传 (替代支架相机/USB 相机): Astra RGB -> sensor_msgs/Image ----
         // 师兄的温度-视觉验证与 Foxglove 回传直接换图像源即可; Foxglove bridge 自带压缩.
@@ -137,10 +140,14 @@ public:
         fusion_pub_ = this->create_publisher<std_msgs::msg::String>("fusion_result", 10);
         if (enable_pointcloud_) {
             cloud_pub_ = this->create_publisher<sensor_msgs::msg::PointCloud2>(cloud_topic_, 5);
+            neg_pub_ = this->create_publisher<sensor_msgs::msg::PointCloud2>(neg_topic_, 5);
             RCLCPP_INFO(this->get_logger(),
                 "近场点云已启用: topic=%s frame=%s 下采样步长=%d (配合 static TF %s -> base_link)",
                 cloud_topic_.c_str(), cloud_frame_.c_str(), cloud_step_,
                 cloud_frame_.c_str());
+            RCLCPP_INFO(this->get_logger(),
+                "负障碍检测已启用: topic=%s frame=%s (P1 地面分割, 落差阈值 %.2fm)",
+                neg_topic_.c_str(), neg_frame_.c_str(), gseg_params_.cliff_drop_min);
         }
         if (enable_rgb_) {
             rgb_pub_ = this->create_publisher<sensor_msgs::msg::Image>(rgb_topic_, 5);
@@ -217,23 +224,43 @@ private:
         // 降采样 + 序列化: x/y/z float32 + 4 字节 padding, point_step=16
         const size_t total = cloud_link.points.size();
         const size_t step = static_cast<size_t>(cloud_step_);
-        std::vector<uint8_t> buf;
-        buf.reserve((total / step + 1) * 16);
+        std::vector<Point3D> ds_points;
+        ds_points.reserve(total / step + 1);
         for (size_t i = 0; i < total; i += step) {
-            const auto& p = cloud_link.points[i];
-            const float xyz[4] = {static_cast<float>(p.x), static_cast<float>(p.y),
-                                  static_cast<float>(p.z), 0.0f};
-            const auto* bytes = reinterpret_cast<const uint8_t*>(xyz);
-            buf.insert(buf.end(), bytes, bytes + sizeof(xyz));
+            ds_points.push_back(cloud_link.points[i]);
         }
-        if (buf.empty()) return;
+        if (ds_points.empty()) return;  // 全无效深度, 无可发布
+        auto stamp = this->now();
+        cloud_pub_->publish(marshal_xyz(ds_points, cloud_frame_, stamp));
 
+        // 近场负障碍 (P1): base_link 系地面分割 → 坑/下行台阶标记点
+        if (neg_pub_) {
+            PointCloud cloud_base;
+            transform_to_base(cloud_link, cloud_E_, cloud_base);
+            GroundSegResult seg;
+            segment_ground(cloud_base, gseg_params_, seg);
+            if (!seg.negative_points.empty()) {
+                neg_pub_->publish(
+                    marshal_xyz(seg.negative_points, neg_frame_, stamp));
+            } else if (!seg.plane.valid && !use_simulated_) {
+                // 真机找不到地面平面 (俯仰/装高参数不对? 或镜头没对着地面) —— 节流提醒
+                RCLCPP_WARN_THROTTLE(this->get_logger(), *this->get_clock(), 10000,
+                    "地面平面拟合失败, 负障碍检测停用 (检查相机外参/ground_prior)");
+            }
+            // 模拟模式: 仿真数据是纯墙面无地面, plane 恒 invalid, 静默跳过
+        }
+    }
+
+    // xyz 点列 -> PointCloud2 (x/y/z float32 + 4 字节 padding, point_step=16)
+    static sensor_msgs::msg::PointCloud2 marshal_xyz(
+        const std::vector<Point3D>& pts, const std::string& frame,
+        const rclcpp::Time& stamp) {
         sensor_msgs::msg::PointCloud2 msg;
-        msg.header.stamp = this->now();
-        msg.header.frame_id = cloud_frame_;
+        msg.header.stamp = stamp;
+        msg.header.frame_id = frame;
         msg.height = 1;
-        msg.width = static_cast<uint32_t>(buf.size() / 16);
-        msg.is_dense = true;       // depth_to_cloud 已按 [0.6, 8.0]m 过滤无效像素
+        msg.width = static_cast<uint32_t>(pts.size());
+        msg.is_dense = true;
         msg.is_bigendian = false;
         msg.point_step = 16;
         msg.row_step = msg.point_step * msg.width;
@@ -243,8 +270,14 @@ private:
         field.name = "x"; field.offset = 0; msg.fields.push_back(field);
         field.name = "y"; field.offset = 4; msg.fields.push_back(field);
         field.name = "z"; field.offset = 8; msg.fields.push_back(field);
-        msg.data = std::move(buf);
-        cloud_pub_->publish(msg);
+        msg.data.reserve(pts.size() * 16);
+        for (const auto& p : pts) {
+            const float xyz[4] = {static_cast<float>(p.x), static_cast<float>(p.y),
+                                  static_cast<float>(p.z), 0.0f};
+            const auto* bytes = reinterpret_cast<const uint8_t*>(xyz);
+            msg.data.insert(msg.data.end(), bytes, bytes + sizeof(xyz));
+        }
+        return msg;
     }
 
     // RGB 回传: Astra 彩色帧缓存 -> sensor_msgs/Image (rgb8). 按 rgb_fps 节流;
@@ -363,6 +396,7 @@ private:
     rclcpp::Publisher<geometry_msgs::msg::Twist>::SharedPtr cmd_vel_pub_;
     rclcpp::Publisher<std_msgs::msg::String>::SharedPtr fusion_pub_;
     rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr cloud_pub_;
+    rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr neg_pub_;
     rclcpp::Publisher<sensor_msgs::msg::Image>::SharedPtr rgb_pub_;
     rclcpp::Subscription<sensor_msgs::msg::LaserScan>::SharedPtr scan_sub_;
     rclcpp::TimerBase::SharedPtr timer_;
@@ -380,6 +414,12 @@ private:
     std::string cloud_frame_ = "camera_link";
     int cloud_step_ = 8;
     CameraIntrinsics cloud_K_;
+
+    // 负障碍 (P1): 地面分割参数取算法库默认 (GroundSegConfig), 手持实验改 config.h
+    std::string neg_topic_ = "/mechdog/negative_obstacles";
+    std::string neg_frame_ = "base_link";
+    CameraExtrinsics cloud_E_;    // 外参占位值 (装机量测后与 launch TF 同步更新)
+    GroundSegParams gseg_params_;
 
     // RGB 回传 (替代支架相机): 参数 + 发布节流状态 (仅融合线程访问, 无需锁)
     bool enable_rgb_ = false;
