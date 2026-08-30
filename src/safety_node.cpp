@@ -234,9 +234,15 @@ private:
         cloud_pub_->publish(marshal_xyz(ds_points, cloud_frame_, stamp));
 
         // 近场负障碍 (P1): base_link 系地面分割 → 坑/下行台阶标记点
+        // 注意: 分割用降采样云 (与发布同源), 全量 30 万点在 Pi 上 10Hz 扛不住
         if (neg_pub_) {
+            PointCloud cloud_ds_link;
+            cloud_ds_link.seq = cloud_link.seq;
+            cloud_ds_link.stamp = cloud_link.stamp;
+            cloud_ds_link.frame_id = cloud_link.frame_id;
+            cloud_ds_link.points = ds_points;
             PointCloud cloud_base;
-            transform_to_base(cloud_link, cloud_E_, cloud_base);
+            transform_to_base(cloud_ds_link, cloud_E_, cloud_base);
             GroundSegResult seg;
             segment_ground(cloud_base, gseg_params_, seg);
             if (!seg.negative_points.empty()) {
