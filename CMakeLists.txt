@@ -25,6 +25,7 @@ find_package(rclcpp REQUIRED)
 find_package(std_msgs REQUIRED)
 find_package(geometry_msgs REQUIRED)
 find_package(sensor_msgs REQUIRED)
+find_package(nav_msgs REQUIRED)
 
 # 真机 Astra Pro: 与上游算法库同名开关, 透传编译定义与 SDK 链接 (FIX-6/ROS-1)
 option(USE_ASTRA_SDK "Enable Astra Pro via Orbbec Astra SDK (真机模式)" OFF)
@@ -89,7 +90,23 @@ target_link_libraries(chassis_bridge_node
 )
 target_compile_features(chassis_bridge_node PRIVATE cxx_std_20)
 
-install(TARGETS safety_node chassis_bridge_node
+# 建图演示节点 (P4 demo): odom 位姿 + 合成深度 → 占据栅格 → /map + PGM
+# 复用 mechdog_algo 之外还需 point_cloud/mapping 两个算法源文件 (P0/P4)
+add_executable(mapping_demo_node src/mapping_demo_node.cpp
+  ${MECHDOG_ALGO_DIR}/point_cloud.cpp
+  ${MECHDOG_ALGO_DIR}/mapping.cpp
+)
+target_include_directories(mapping_demo_node PRIVATE
+  ${MECHDOG_ALGO_DIR}
+  $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}>
+)
+target_link_libraries(mapping_demo_node
+  rclcpp::rclcpp
+  nav_msgs::nav_msgs
+)
+target_compile_features(mapping_demo_node PRIVATE cxx_std_20)
+
+install(TARGETS safety_node chassis_bridge_node mapping_demo_node
   DESTINATION lib/${PROJECT_NAME}
 )
 
