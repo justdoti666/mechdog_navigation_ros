@@ -84,6 +84,7 @@ ros2 launch mechdog_navigation_ros safety.launch.py use_simulated:=false
 | `/mechdog/point_cloud` | sensor_msgs/PointCloud2 | 发布 | 近场深度点云（`camera_link` 系, `enable_pointcloud:=true` 启用, 默认关） |
 | `/mechdog/negative_obstacles` | sensor_msgs/PointCloud2 | 发布 | **负障碍标记点**（`base_link` 系地面高度处, P1 地面分割检出坑/下行台阶; 跟随 `enable_pointcloud`） |
 | `/mechdog/rgb/image_raw` | sensor_msgs/Image (rgb8) | 发布 | Astra 彩色帧（`enable_rgb:=true` 启用, 默认关；真机出图，默认 10fps，Foxglove bridge 自带压缩） |
+| `/map` | nav_msgs/OccupancyGrid | 发布 | 占据栅格地图（仅 `mapping_demo_node`，1Hz；`odom_dry_run` 系） |
 
 ## 对接注意
 
@@ -161,13 +162,37 @@ ros2 launch mechdog_navigation_ros safety.launch.py use_simulated:=false enable_
 - 师兄侧改动：视觉源从支架相机话题切到本话题即可，"温度-视觉"管线本身不动
 
 
+## 建图端到端演示（P4 demo）
+
+`mapping_demo_node` — 验证「里程计位姿 → 点云 → 占据栅格」全链路的演示节点。深度为**合成帧**（模拟 3m 处横墙，内参按帧分辨率同比缩放），位姿为师兄 `base_cmd_vel_odom_node` 的真实输出，建图管线为算法库 P0/P4 真实代码。
+
+```bash
+# 终端1: 师兄 dry_run 里程计 (cmd_vel 开环积分, 位姿归零起步)
+ros2 launch quadruped_base base_odom_dry_run.launch.py
+
+# 终端2: 建图演示节点
+ros2 run mechdog_navigation_ros mapping_demo_node
+
+# 终端3: 驱动机器人 "行驶"
+ros2 topic pub -r 10 /odom_test_cmd_vel geometry_msgs/msg/Twist "{linear: {x: 0.2}}"
+
+# 查看: 地图话题 / PGM 落盘 ~/mechdog_map.pgm
+ros2 topic echo /map --once | head -20
+```
+
+已验证（2026-09，WSL）：前进 0.6m + 原地转 1.2rad，PGM 占据点几何分布与解析模型**点级吻合**（墙带位置/转角扫掠轨迹/无背后异常点/首帧墙距含相机前偏）。
+
+**定位边界**：本节点是建图链路的**演示/联调工具**，正式建图节点（Astra 真深度 + 真底盘 odom）待硬件接入后落地；生产全局建图定位仍归师兄栈（见上「近场点云」P3 定位声明，两者边界一致——demo 节点不改变近场感知定位）。
+
 ## 状态
 
 - [x] 包骨架 + safety_node 模拟模式
 - [x] 底盘通信层（ChassisBridge 接口 + 模拟实现 + Stm32ChassisBridge 21 字节帧实现）
 - [x] 对接闸门（/unsafe/cmd_vel + sensor_data QoS）
+- [x] 建图端到端演示（mapping_demo_node：dry_run odom + 合成深度 → /map + PGM，几何点级校验通过）
 - [ ] ROS2 版本确认
 - [ ] 真机传感器节点（Astra SDK / HC-SR04 libgpiod）
 - [ ] Stm32ChassisBridge 串口实机联调（协议已实现, 待硬件验证）
+- [ ] 建图真机化（Astra 真深度替换合成帧 + 真底盘 odom 位姿；Windows 侧静止/旋转扫描已由算法库 `tools/mapping_real_test` 验证）
 - [ ] 真机部署前：确认前向全盲 `SLOW_FORWARD` 策略与全局闸门的兜底关系（mechdog_navigation README「已知限制」#7）
 - [ ] Nav2 速度仲裁接入
