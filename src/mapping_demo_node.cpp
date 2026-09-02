@@ -133,6 +133,9 @@ private:
         mechdog::transform_to_base(cloud_optical, E_, cloud_base);
 
         // --- 真实管线 P4: 累积建图 ---
+        // 注: 合成帧是悬浮平面墙(无地面), 用 insert_cloud 原入口 —
+        //     filtered 入口会做地面分割, 对合成分布行为不可预测;
+        //     真机链路请参考算法库 tools/mapping_real_test (用 filtered)
         map_.insert_cloud(cloud_base, last_pose_);
         ++frames_;
     }
