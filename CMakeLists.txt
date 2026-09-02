@@ -91,10 +91,12 @@ target_link_libraries(chassis_bridge_node
 target_compile_features(chassis_bridge_node PRIVATE cxx_std_20)
 
 # 建图演示节点 (P4 demo): odom 位姿 + 合成深度 → 占据栅格 → /map + PGM
-# 复用 mechdog_algo 之外还需 point_cloud/mapping 两个算法源文件 (P0/P4)
+# 复用 mechdog_algo 之外还需 point_cloud/mapping/ground_segmentation
+# (mapping 的 insert_cloud_filtered 依赖 segment_ground, FIX_PLAN #1)
 add_executable(mapping_demo_node src/mapping_demo_node.cpp
   ${MECHDOG_ALGO_DIR}/point_cloud.cpp
   ${MECHDOG_ALGO_DIR}/mapping.cpp
+  ${MECHDOG_ALGO_DIR}/ground_segmentation.cpp
 )
 target_include_directories(mapping_demo_node PRIVATE
   ${MECHDOG_ALGO_DIR}

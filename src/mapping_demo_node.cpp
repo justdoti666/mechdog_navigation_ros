@@ -181,7 +181,7 @@ private:
     // 内参: 构造函数里按 frame_w_/frame_h_ 参数同比缩放 (见上)
     mechdog::CameraIntrinsics K_{};      // 默认值 = 640x480 基准
     mechdog::CameraExtrinsics E_{};      // 默认外参 (前 0.12m, 俯 15°)
-    mechdog::OccupancyGridMap map_{0.25};
+    mechdog::OccupancyGridMap map_{mechdog::MapConfig{}, 0.25};
 
     rclcpp::Subscription<nav_msgs::msg::Odometry>::SharedPtr odom_sub_;
     rclcpp::Publisher<nav_msgs::msg::OccupancyGrid>::SharedPtr map_pub_;
