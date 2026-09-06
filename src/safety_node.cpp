@@ -34,6 +34,9 @@
 #include "sensor_msgs/msg/laser_scan.hpp"
 #include "std_msgs/msg/string.hpp"
 
+// 方案A: 订阅独立 ultrasonic_node 发布的 /ultrasonic (mechdog_ultrasonic 包的消息)
+#include "mechdog_ultrasonic/msg/ultrasonic_array.hpp"
+
 // 纯算法库
 #include "sensor_astra.h"
 #include "sensor_ultrasonic.h"
@@ -98,6 +101,26 @@ public:
             "scan", rclcpp::SensorDataQoS(),
             [this](const sensor_msgs::msg::LaserScan::SharedPtr msg) {
                 scan_ranges_ = msg->ranges;
+            });
+
+        // 方案A: 订阅独立 ultrasonic_node 的 /ultrasonic, 注入算法库 UltrasonicArrayDriver
+        // (替代算法库内部 GPIO 直读; 未收到/过期时 read_all 回退内部读取, fail-safe)
+        ultra_sub_ = this->create_subscription<mechdog_ultrasonic::msg::UltrasonicArray>(
+            "ultrasonic", rclcpp::SensorDataQoS(),
+            [this](const mechdog_ultrasonic::msg::UltrasonicArray::SharedPtr msg) {
+                UltrasonicArrayData d;
+                d.timestamp = rclcpp::Time(msg->stamp).seconds();
+                auto to_reading = [](double cm, bool valid) {
+                    UltrasonicReading r;
+                    r.distance_cm = cm;
+                    r.valid = valid;
+                    return r;
+                };
+                d.front_left = to_reading(msg->front_left_cm, msg->front_left_valid);
+                d.front_center = to_reading(msg->front_center_cm, msg->front_center_valid);
+                d.front_right = to_reading(msg->front_right_cm, msg->front_right_valid);
+                d.bottom = to_reading(msg->bottom_cm, msg->bottom_valid);
+                ultrasonic_->inject_external_data(d);
             });
 
         // 定时器: 5Hz 发布最新融合结果 (融合本身在独立线程, 见上 H3 说明)
@@ -221,6 +244,7 @@ private:
     rclcpp::Publisher<geometry_msgs::msg::Twist>::SharedPtr cmd_vel_pub_;
     rclcpp::Publisher<std_msgs::msg::String>::SharedPtr fusion_pub_;
     rclcpp::Subscription<sensor_msgs::msg::LaserScan>::SharedPtr scan_sub_;
+    rclcpp::Subscription<mechdog_ultrasonic::msg::UltrasonicArray>::SharedPtr ultra_sub_;
     rclcpp::TimerBase::SharedPtr timer_;
 
     bool use_simulated_ = true;

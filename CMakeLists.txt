@@ -22,6 +22,8 @@ find_package(rclcpp REQUIRED)
 find_package(std_msgs REQUIRED)
 find_package(geometry_msgs REQUIRED)
 find_package(sensor_msgs REQUIRED)
+# 方案A: 依赖 mechdog_ultrasonic 包 (订阅 /ultrasonic 消息)
+find_package(mechdog_ultrasonic REQUIRED)
 
 # 真机 Astra Pro: 与上游算法库同名开关, 透传编译定义与 SDK 链接 (FIX-6/ROS-1)
 option(USE_ASTRA_SDK "Enable Astra Pro via Orbbec Astra SDK (真机模式)" OFF)
@@ -54,6 +56,8 @@ target_link_libraries(safety_node
   geometry_msgs::geometry_msgs
   sensor_msgs::sensor_msgs
 )
+# 方案A: mechdog_ultrasonic 消息包依赖 —— ament_target_dependencies 负责 include + 消息 typesupport 链接
+ament_target_dependencies(safety_node mechdog_ultrasonic)
 target_compile_features(safety_node PRIVATE cxx_std_20)
 
 # 真机 Astra Pro: 与上游算法库同名开关, 透传编译定义与 SDK 链接 (FIX-6/ROS-1)
