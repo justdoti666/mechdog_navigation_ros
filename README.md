@@ -8,6 +8,7 @@
 |---|---|---|
 | **mechdog_navigation** | 本包同级 `../mechdog_navigation/` | 纯算法库（C++20，无 ROS2 依赖）：SensorFusion 多传感器融合（Astra 深度 + 4×HC-SR04 超声 + 红外环境）、PathPlanner 速度决策 |
 | **mechdog_navigation_ros**（本包） | 任意 | 局部安全层 ROS2 节点：融合 → 规划 → 发布速度指令到安全闸门输入 |
+| **mechdog_ultrasonic**（本包子包） | 本包内 `mechdog_ultrasonic/` | HC-SR04 超声波阵列 ROS2 驱动（方案A）：消息 + 独立 `ultrasonic_node`，发布 `/ultrasonic` 供 safety_node 订阅 |
 | **quadruped_ws** | 全局层：Nav2 导航、cartographer/AMCL 建图定位、lidar 避障、语音/云台/热成像、双层速度闸门、STM32H723 串口底盘桥 |
 
 ### 速度指令控制链（安全分层）
@@ -47,6 +48,9 @@ mechdog_navigation_ros/
 ├── src/stb_image_write.h  # 单头文件 JPEG 编码库 (RGB 回传依赖)
 ├── src/chassis_bridge.hpp # 底盘通信抽象: ChassisBridge 接口 + 模拟/STM32(21字节帧) 实现
 ├── src/chassis_bridge_node.cpp  # 底盘桥接节点: 订阅 /cmd_vel -> 发送到底盘
+├── mechdog_ultrasonic/    # 方案A: HC-SR04 超声波 ROS2 子包 (独立发布 /ultrasonic)
+│   ├── msg/UltrasonicArray.msg   # 4颗超声读数 + 有效性 + 时间戳
+│   └── src/ultrasonic_node.cpp   # 读GPIO(libgpiod)/模拟 -> 发布 /ultrasonic
 └── launch/safety.launch.py
 ```
 
@@ -54,16 +58,18 @@ mechdog_navigation_ros/
 
 - ROS2 (Jazzy / Humble), colcon
 - `mechdog_navigation` 纯算法库源码（与本包**同级目录**，即 `../mechdog_navigation/`）
-- 传感器真机驱动：Astra Pro（Orbbec Astra SDK，真机经 `USE_ASTRA_SDK` 编译）、HC-SR04（libgpiod/pigpio，Pi 5 用）、环境光强（默认 `estimate_ambient_light()` 深度图代理，TSL2591 已取消购买）
+- `mechdog_ultrasonic`（本包子包，方案A：超声波消息 + 节点；`colcon build` 先编它）
+- 传感器真机驱动：Astra Pro（Orbbec Astra SDK，真机经 `USE_ASTRA_SDK` 编译）、HC-SR04（本包 ultrasonic_node 经 libgpiod，Pi 5 用）、环境光强（默认 `estimate_ambient_light()` 深度图代理，TSL2591 已取消购买）
 
 ## 构建 & 运行
 
 ```bash
 # 工作区布局: colcon_ws/src/ 下同时放 mechdog_navigation 和 mechdog_navigation_ros
 #   colcon_ws/src/mechdog_navigation/          # 纯算法库 (上游仓库)
-#   colcon_ws/src/mechdog_navigation_ros/      # 本包
+#   colcon_ws/src/mechdog_navigation_ros/      # 本包 (含 mechdog_ultrasonic 子包)
 cd ~/colcon_ws
-colcon build --packages-select mechdog_navigation_ros
+# 方案A: 先编译超声子包(消息), 再编胶水包
+colcon build --packages-select mechdog_ultrasonic mechdog_navigation_ros
 source install/setup.bash
 
 # 模拟模式 (无需硬件, PC 直接跑)
@@ -71,6 +77,9 @@ ros2 launch mechdog_navigation_ros safety.launch.py
 
 # 真机模式
 ros2 launch mechdog_navigation_ros safety.launch.py use_simulated:=false
+
+# 方案A: 超声波独立节点 (先启动, 再跑 safety_node; 模拟数据可看链路)
+ros2 run mechdog_ultrasonic ultrasonic_node
 ```
 
 ## 话题接口
@@ -81,6 +90,7 @@ ros2 launch mechdog_navigation_ros safety.launch.py use_simulated:=false
 | `/cmd_vel` | geometry_msgs/Twist | 订阅 | chassis_bridge_node 消费, 发送到底盘（wheel_board_bridge 或本包 stm32 桥） |
 | `/fusion_result` | std_msgs/String (JSON) | 发布 | 融合结果 JSON（环境/悬崖/前方距离/动作/权重/速度） |
 | `/scan` | sensor_msgs/LaserScan | 订阅 | 雷达（sensor_data QoS, 当前缓存预留, 不参与融合） |
+| `/ultrasonic` | mechdog_ultrasonic/UltrasonicArray | 订阅 | **方案A**: 超声波阵列读数（`ultrasonic_node` 发布; safety_node 订阅后注入算法库, 替代内部 GPIO 直读; 未收到/过期时算法库回退内部读取） |
 | `/mechdog/point_cloud` | sensor_msgs/PointCloud2 | 发布 | 近场深度点云（`camera_link` 系, `enable_pointcloud:=true` 启用, 默认关） |
 | `/mechdog/negative_obstacles` | sensor_msgs/PointCloud2 | 发布 | **负障碍标记点**（`base_link` 系地面高度处, P1 地面分割检出坑/下行台阶; 跟随 `enable_pointcloud`） |
 | `/mechdog/rgb/image_raw` | sensor_msgs/Image (rgb8) | 发布 | Astra 彩色帧（`enable_rgb:=true` 启用, 默认关；真机出图，默认 10fps，Foxglove bridge 自带压缩） |
@@ -184,14 +194,68 @@ ros2 topic echo /map --once | head -20
 
 **定位边界**：本节点是建图链路的**演示/联调工具**，正式建图节点（Astra 真深度 + 真底盘 odom）待硬件接入后落地；生产全局建图定位仍归师兄栈（见上「近场点云」P3 定位声明，两者边界一致——demo 节点不改变近场感知定位）。
 
+## 方案A：超声波独立节点（HC-SR04）
+
+> 设计动机：树莓派 GPIO 接口紧张（舵机云台/雷达等占用），且超声波作为独立驱动节点**解耦、好调试**。
+> 方案A 让超声波由独立的 `ultrasonic_node` 读取并发布 `/ultrasonic`，`safety_node` 订阅后注入算法库，
+> **替代算法库内部直接读 GPIO**（未收到/过期时算法库回退内部读取，fail-safe）。
+
+### 数据链路
+
+```
+HC-SR04 ×4 (左前/正前/右前/底部) → 树莓派 GPIO(电平转换5V→3.3V)
+  → ultrasonic_node (libgpiod 读 / 模拟)
+  → /ultrasonic (mechdog_ultrasonic/UltrasonicArray)
+  → safety_node 订阅 → 转 UltrasonicArrayData → 算法库 inject_external_data()
+  → SensorFusion 融合 → /unsafe/cmd_vel
+```
+
+### 使用
+
+```bash
+# 编译（先超声子包, 再胶水包）
+colcon build --packages-select mechdog_ultrasonic mechdog_navigation_ros
+source install/setup.bash
+
+# 1) 启动超声波节点（默认模拟; 树莓派真读见下）
+ros2 run mechdog_ultrasonic ultrasonic_node
+
+# 2) 启动安全层（订阅 /ultrasonic）
+ros2 run mechdog_navigation_ros safety_node
+
+# 3) 验证
+ros2 topic echo /ultrasonic --once     # 看到 4 颗读数
+```
+
+### 树莓派真读（GPIO）
+
+```bash
+# 编译时启用 libgpiod（需树莓派装 libgpiod）
+colcon build --packages-select mechdog_ultrasonic \
+  --cmake-args -DUSE_GPIO=ON [-DLIBGPIOD_VERSION=v2]
+# 运行（sudo 访问 GPIO）
+sudo ros2 run mechdog_ultrasonic ultrasonic_node \
+  --ros-args -p use_gpio:=true
+```
+
+> ⚠️ **接线注意**：HC-SR04 是 5V 电平，树莓派 GPIO 3.3V——Echo 回波必须**电平转换(分压)**，否则可能损坏树莓派。引脚用 ROS 参数 `trig_pins`/`echo_pins`（默认 `[23,17,5,13]`/`[24,27,6,19]`，WiringPi 编号），接线定了改参数即可，**代码不用改**。
+
+### 子包内容
+
+| 文件 | 作用 |
+|---|---|
+| `mechdog_ultrasonic/msg/UltrasonicArray.msg` | 4 颗超声读数(cm) + 有效性标记 + 时间戳 + seq |
+| `mechdog_ultrasonic/src/ultrasonic_node.cpp` | 读 GPIO(USE_GPIO)/模拟 → 发布 /ultrasonic；引脚/频率 ROS 参数可配 |
+
 ## 状态
 
 - [x] 包骨架 + safety_node 模拟模式
 - [x] 底盘通信层（ChassisBridge 接口 + 模拟实现 + Stm32ChassisBridge 21 字节帧实现）
 - [x] 对接闸门（/unsafe/cmd_vel + sensor_data QoS）
 - [x] 建图端到端演示（mapping_demo_node：dry_run odom + 合成深度 → /map + PGM，几何点级校验通过）
+- [x] 超声波独立节点（方案A：mechdog_ultrasonic 子包，模拟跑通 + safety_node 订阅注入；真实 libgpiod 读取待树莓派接线）
 - [ ] ROS2 版本确认
-- [ ] 真机传感器节点（Astra SDK / HC-SR04 libgpiod）
+- [ ] 真机传感器节点（Astra SDK 深度，真机化；HC-SR04 真读待接线 + 电平转换）
 - [ ] Stm32ChassisBridge 串口实机联调（协议已实现, 待硬件验证）
 - [ ] 建图真机化（Astra 真深度替换合成帧 + 真底盘 odom 位姿；Windows 侧静止/旋转扫描已由算法库 `tools/mapping_real_test` 验证）
 - [ ] 真机部署前：确认前向全盲 `SLOW_FORWARD` 策略与全局闸门的兜底关系（mechdog_navigation README「已知限制」#7）
