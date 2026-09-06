@@ -49,6 +49,7 @@
 #include "path_planner.h"
 #include "point_cloud.h"
 #include "ground_segmentation.h"
+#include "safety_warmup.hpp"   // R4 (REVIEW): 启动预热 —— 等 bottom 首帧再首轮 fuse
 
 using namespace mechdog;
 using namespace std::chrono_literals;
@@ -62,6 +63,10 @@ public:
         //       订阅 /unsafe/cmd_vel 作为闸门输入, 经安全检查后转发到 /cmd_vel;
         //       直接发 /cmd_vel 会绕过师兄的安全闸门, 违反安全分层)
         cmd_vel_topic_ = this->declare_parameter("cmd_vel_topic", "/unsafe/cmd_vel");
+        // R4 (REVIEW): 启动预热时长 (ms)。融合线程启动时先等底部线程产出首帧再首轮 fuse(),
+        //   消除启动期 is_fall_risk() 因 !bottom_have_ 造成的一帧误急停 (~150ms)。
+        //   默认 250ms: 就绪即返 (sim ~50-150ms), 有界不阻塞; 超时仍继续 (fail-closed 兜底)。
+        warmup_ms_ = this->declare_parameter("warmup_ms", 250);
 
         // ---- 近场点云 (P3 起步): 深度帧反投影 -> camera_link 系 PointCloud2 ----
         // 定位: 近场局部 3D 感知, 喂 Nav2 voxel_layer 做悬空/立体障碍标记; 全局建图归师兄激光雷达.
@@ -105,6 +110,11 @@ public:
         fusion_running_ = true;
         fusion_thread_ = std::thread([this]() {
             constexpr auto kMinCycle = std::chrono::milliseconds(100);  // ROS-2
+            // R4 (REVIEW): 启动预热 —— 等底部线程首帧 (就绪即返, 有界超时; 超时也继续,
+            //   后续 is_fall_risk() 仍 fail-closed 兜底)。放在首轮 fuse() 之前, 避免
+            //   启动期 bottom 未就绪导致 cliff_detected=true -> 首帧必 STOP。
+            mechdog_ros::wait_for_bottom_ready(
+                *ultrasonic_, std::chrono::milliseconds(warmup_ms_));
             while (true) {
                 auto t0 = std::chrono::steady_clock::now();
                 auto result = fusion_->fuse();
@@ -433,6 +443,8 @@ private:
 
     bool use_simulated_ = true;
     std::string cmd_vel_topic_ = "/unsafe/cmd_vel";
+    // R4 (REVIEW): 启动预热时长 (ms), 见参数声明处
+    int warmup_ms_ = 250;
     unsigned int tick_ = 0;
     // ROS-5 (v2.2): scan_ranges_ 加显式锁 (原仅靠单线程 executor 隐式串行, 现显式保护)
     std::mutex scan_mutex_;

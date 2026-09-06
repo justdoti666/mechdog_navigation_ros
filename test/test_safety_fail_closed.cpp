@@ -19,6 +19,7 @@
 #include "sensor_ir.h"
 #include "sensor_fusion.h"
 #include "path_planner.h"
+#include "safety_warmup.hpp"   // R4 (REVIEW): 启动预热等待
 
 using namespace mechdog;
 
@@ -64,6 +65,15 @@ TEST(SafetyFailClosed, FallbackEightMetersNeverBecomesForward) {
     VelocityCmd cmd = planner.plan(result);
     EXPECT_DOUBLE_EQ(cmd.linear, 0.0);
     EXPECT_DOUBLE_EQ(cmd.angular, 0.0);
+}
+
+// R4 (REVIEW): 启动预热 —— 等底部线程产出首帧, 消除启动期 is_fall_risk() 的一帧误急停。
+// sim 驱动 bottom 线程 20Hz (~50-150ms 首帧); 2s 预算下 wait_for_bottom_ready 必然返回 true。
+TEST(SafetyFailClosed, WarmupWaitsForBottomReady) {
+    UltrasonicArrayDriver ultrasonic(get_ultrasonic_layout());
+    bool ready = mechdog_ros::wait_for_bottom_ready(
+        ultrasonic, std::chrono::milliseconds(2000));
+    EXPECT_TRUE(ready);   // 若 sim bottom 线程异常未产出, 此处失败即暴露
 }
 
 int main(int argc, char** argv) {
