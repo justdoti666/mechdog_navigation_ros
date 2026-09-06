@@ -8,10 +8,12 @@
  *   - 默认模拟模式 (WSL/PC 可跑通链路): 生成随机读数
  *   - USE_GPIO=ON (树莓派): libgpiod 读 Trig/Echo; 需 sudo 权限 + 电平转换 (5V→3.3V)
  *
- * 引脚 (ROS 参数, 默认对齐算法库 config.h get_ultrasonic_layout 的物理 GPIO 号):
- *   trig_pins  = [23, 17, 5, 13]      (WiringPi 号, 树莓派接线按此)
- *   echo_pins  = [24, 27, 6, 19]
- *
+ * 引脚 (ROS 参数; 值为 BCM GPIO 号 = libgpiod line offset, 非 WiringPi 号):
+ *   默认对齐算法库 config.h get_ultrasonic_layout(), 物理引脚号见 docs/ULTRASONIC_WIRING.md:
+ *   trig_pins  = [23, 17, 5, 13]  (BCM)  → 物理 Pin 16 / 11 / 29 / 33
+ *   echo_pins  = [24, 27, 6, 19]  (BCM)  → 物理 Pin 18 / 13 / 31 / 35
+ *   顺序 = [front_left, front_center, front_right, bottom]
+ *   ⚠️ Echo 为 5V 输出, 必须 1kΩ+2kΩ 分压到 3.3V 再接 Pi (详见 ULTRASONIC_WIRING.md §3) *
  * 构建: colcon build --packages-select mechdog_ultrasonic
  * 运行: ros2 run mechdog_ultrasonic ultrasonic_node
  *       # 树莓派真读: colcon build ... -DUSE_GPIO=ON

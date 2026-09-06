@@ -66,17 +66,21 @@ source install/setup.bash
 
 ## 3. HC-SR04 ×4 接入（避障 + 防摔落）
 
-**物理接线**（每个 HC-SR04 4 针，共 4 颗；GPIO 布局以 `mechdog_navigation/config.h` 为准）：
+> **接线定稿见 `docs/ULTRASONIC_WIRING.md`（含 40-pin 排针图 + 电平转换电路），本节为速览。**
+> （2026-08 更新：引脚编号一律为 **BCM GPIO 号**，与 libgpiod line offset 一致；
+>  早期文档中"WiringPi 号"表述作废，phys 引脚号以排针图为准。）
+
+**物理接线**（每个 HC-SR04 4 针，共 4 颗；BCM GPIO 布局与 `mechdog_navigation/config.h` 一致）：
 ```
 HC-SR04 → 树莓派 GPIO
 VCC     → Pin 2 (5V)
-GND     → Pin 6 (GND)
-前左 TRIG/ECHO → GPIO23 / GPIO24
-正前 TRIG/ECHO → GPIO17 / GPIO27
-前右 TRIG/ECHO → GPIO5  / GPIO6
-底部 TRIG/ECHO → GPIO13 / GPIO19
-⚠️ ECHO 是 5V 输出，必须分压到 3.3V 再接树莓派（电阻分压：2.2kΩ 串联 + 3.3kΩ 到地）
-⚠️ 接线对照必须与 `config.h` 的 ultrasonic_layout 一致（front_left=23/24, front_center=17/27,
+GND     → Pin 6 (GND)   (每颗独立回地)
+前左 TRIG/ECHO → GPIO23(Pin16) / GPIO24(Pin18)
+正前 TRIG/ECHO → GPIO17(Pin11) / GPIO27(Pin13)
+前右 TRIG/ECHO → GPIO5(Pin29)  / GPIO6(Pin31)
+底部 TRIG/ECHO → GPIO13(Pin33) / GPIO19(Pin35)
+⚡ Echo 是 5V 输出，必须分压到 3.3V 再接树莓派（1kΩ 串联 + 2kΩ 到地 → 3.3V，4 路共 8 电阻）
+⚠️ 接线对照必须与 config.h 的 ultrasonic_layout 一致（front_left=23/24, front_center=17/27,
    front_right=5/6, bottom=13/19），照此前版本文档（TRIG=17/22/23/24）接线会与驱动不符。
 ```
 
