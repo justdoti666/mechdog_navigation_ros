@@ -1,0 +1,28 @@
+<?xml version="1.0"?>
+<?xml-model href="http://download.ros.org/schema/package_format3.xsd" schematypens="http://www.w3.org/2001/XMLSchema"?>
+<package format="3">
+  <name>mechdog_ultrasonic</name>
+  <version>0.1.0</version>
+  <description>HC-SR04 超声波阵列 ROS2 驱动包: 消息定义 + 独立 ultrasonic_node (方案A, libgpiod)</description>
+  <maintainer email="justdoti666@users.noreply.github.com">justdoti666</maintainer>
+  <license>MIT</license>
+
+  <buildtool_depend>ament_cmake</buildtool_depend>
+
+  <!-- 消息 -->
+  <depend>rosidl_default_generators</depend>
+  <member_of_group>rosidl_interface_packages</member_of_group>
+
+  <!-- 节点 -->
+  <depend>rclcpp</depend>
+  <depend>std_msgs</depend>
+
+  <test_depend>ament_lint_auto</test_depend>
+  <test_depend>ament_lint_common</test_depend>
+
+  <exec_depend>rosidl_default_runtime</exec_depend>
+
+  <export>
+    <build_type>ament_cmake</build_type>
+  </export>
+</package>
