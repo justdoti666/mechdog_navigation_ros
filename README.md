@@ -59,7 +59,7 @@ mechdog_navigation_ros/
 - ROS2 (Jazzy / Humble), colcon
 - `mechdog_navigation` 纯算法库源码（与本包**同级目录**，即 `../mechdog_navigation/`）
 - `mechdog_ultrasonic`（本包子包，方案A：超声波消息 + 节点；`colcon build` 先编它）
-- 传感器真机驱动：Astra Pro（Orbbec Astra SDK，真机经 `USE_ASTRA_SDK` 编译）、HC-SR04（本包 ultrasonic_node 经 libgpiod，Pi 5 用）、环境光强（默认 `estimate_ambient_light()` 深度图代理，TSL2591 已取消购买）
+- 传感器真机驱动：Astra Pro（Orbbec Astra SDK，真机经 `USE_ASTRA_SDK` 编译）、HC-SR04（主路径：底盘 STM32 捕获经 0x02 帧上报 → 桥节点补丁发布 /ultrasonic；备选：本包 ultrasonic_node 经 libgpiod，Pi 5 用）、环境光强（默认 `estimate_ambient_light()` 深度图代理，TSL2591 已取消购买）
 
 ## 构建 & 运行
 
@@ -203,12 +203,18 @@ ros2 topic echo /map --once | head -20
 ### 数据链路
 
 ```
-HC-SR04 ×4 (左前/正前/右前/底部) → 树莓派 GPIO(电平转换5V→3.3V)
-  → ultrasonic_node (libgpiod 读 / 模拟)
+HC-SR04 ×4 (左前/正前/右前/底部) → 底盘 STM32 (定时器输入捕获, 5V→3.3V 分压)
+  → 串口 0x02 上报帧 (AA 55 | 02 | 09 | FL/FC/FR/BOT u16cm | flags | checksum)
+  → 师兄 wheel_board_bridge_node (脚本补丁, 见 scripts/ultrasonic_serial_parser.py)
   → /ultrasonic (mechdog_ultrasonic/UltrasonicArray)
   → safety_node 订阅 → 转 UltrasonicArrayData → 算法库 inject_external_data()
   → SensorFusion 融合 → /unsafe/cmd_vel
 ```
+
+> 为什么接 STM32：Pi 5 Linux 无硬件输入捕获（SDK/驱动不暴露），STM32 定时器捕获为亚 µs 级、
+> 零 CPU 轮询。**方案A 消息解耦，数据源随便换——safety_node/算法库零改动**。
+> 完整规格见 `docs/STM32_ULTRASONIC_SPEC.md`（帧协议 / 固件捕获时序 / 桥节点补丁）。
+> 备选：直接接树莓派 GPIO 软件轮询（libgpiod，µs 级够用），见下方「树莓派 GPIO 备选」。
 
 ### 使用
 
@@ -227,7 +233,7 @@ ros2 run mechdog_navigation_ros safety_node
 ros2 topic echo /ultrasonic --once     # 看到 4 颗读数
 ```
 
-### 树莓派真读（GPIO）
+### 树莓派 GPIO 备选（无 STM32 时）
 
 ```bash
 # 编译时启用 libgpiod（需树莓派装 libgpiod）
@@ -238,7 +244,7 @@ sudo ros2 run mechdog_ultrasonic ultrasonic_node \
   --ros-args -p use_gpio:=true
 ```
 
-> ⚠️ **接线注意**：HC-SR04 是 5V 电平，树莓派 GPIO 3.3V——Echo 回波必须**电平转换(分压)**，否则可能损坏树莓派。引脚用 ROS 参数 `trig_pins`/`echo_pins`（默认 `[23,17,5,13]`/`[24,27,6,19]`，WiringPi 编号），接线定了改参数即可，**代码不用改**。
+> ⚠️ **接线注意**：HC-SR04 是 5V 电平，树莓派 GPIO 3.3V——Echo 回波必须**电平转换(分压)**，否则可能损坏树莓派。引脚用 ROS 参数 `trig_pins`/`echo_pins`（默认 `[23,17,5,13]`/`[24,27,6,19]`，**BCM GPIO 号**=libgpiod line offset，物理排针号见 `docs/ULTRASONIC_WIRING.md`）。**本路由为备选：主路径接线已在 STM32 侧固化**（STM32 同样 3.3V 逻辑，Echo 分压电路一致）。
 
 ### 子包内容
 
@@ -253,9 +259,9 @@ sudo ros2 run mechdog_ultrasonic ultrasonic_node \
 - [x] 底盘通信层（ChassisBridge 接口 + 模拟实现 + Stm32ChassisBridge 21 字节帧实现）
 - [x] 对接闸门（/unsafe/cmd_vel + sensor_data QoS）
 - [x] 建图端到端演示（mapping_demo_node：dry_run odom + 合成深度 → /map + PGM，几何点级校验通过）
-- [x] 超声波独立节点（方案A：mechdog_ultrasonic 子包，模拟跑通 + safety_node 订阅注入；真实 libgpiod 读取待树莓派接线）
+- [x] 超声波独立节点（方案A：mechdog_ultrasonic 子包，模拟跑通 + safety_node 订阅注入；`is_fall_risk` 已改注入优先口径 + 单测）
 - [ ] ROS2 版本确认
-- [ ] 真机传感器节点（Astra SDK 深度，真机化；HC-SR04 真读待接线 + 电平转换）
+- [ ] 真机传感器节点（Astra SDK 深度，真机化；HC-SR04 实机数据 = STM32 0x02 上报经桥节点补丁 → /ultrasonic，**待师兄固件+桥补丁落地**）
 - [ ] Stm32ChassisBridge 串口实机联调（协议已实现, 待硬件验证）
 - [ ] 建图真机化（Astra 真深度替换合成帧 + 真底盘 odom 位姿；Windows 侧静止/旋转扫描已由算法库 `tools/mapping_real_test` 验证）
 - [ ] 真机部署前：确认前向全盲 `SLOW_FORWARD` 策略与全局闸门的兜底关系（mechdog_navigation README「已知限制」#7）
