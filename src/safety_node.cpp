@@ -22,6 +22,7 @@
  */
 #include <chrono>
 #include <condition_variable>
+#include <iomanip>
 #include <memory>
 #include <sstream>
 #include <string>
@@ -30,8 +31,11 @@
 #include <thread>
 
 #include "rclcpp/rclcpp.hpp"
+#include "rclcpp/executors/single_threaded_executor.hpp"  // ROS-5: main 用 SingleThreadedExecutor (显式 include, 不依赖聚合头传递)
 #include "geometry_msgs/msg/twist.hpp"
 #include "sensor_msgs/msg/laser_scan.hpp"
+#include "sensor_msgs/msg/point_cloud2.hpp"
+#include "sensor_msgs/msg/image.hpp"
 #include "std_msgs/msg/string.hpp"
 
 // 方案A: 订阅独立 ultrasonic_node 发布的 /ultrasonic (mechdog_ultrasonic 包的消息)
@@ -43,6 +47,8 @@
 #include "sensor_ir.h"
 #include "sensor_fusion.h"
 #include "path_planner.h"
+#include "point_cloud.h"
+#include "ground_segmentation.h"
 
 using namespace mechdog;
 using namespace std::chrono_literals;
@@ -57,6 +63,26 @@ public:
         //       直接发 /cmd_vel 会绕过师兄的安全闸门, 违反安全分层)
         cmd_vel_topic_ = this->declare_parameter("cmd_vel_topic", "/unsafe/cmd_vel");
 
+        // ---- 近场点云 (P3 起步): 深度帧反投影 -> camera_link 系 PointCloud2 ----
+        // 定位: 近场局部 3D 感知, 喂 Nav2 voxel_layer 做悬空/立体障碍标记; 全局建图归师兄激光雷达.
+        // 默认关 (行为不变); 真机注意本节点已独占相机, 勿再开第二个 Astra 进程 (serial 为空, 深度全失效).
+        enable_pointcloud_ = this->declare_parameter("enable_pointcloud", false);
+        cloud_topic_ = this->declare_parameter("cloud_topic", "/mechdog/point_cloud");
+        cloud_frame_ = this->declare_parameter("cloud_frame", "camera_link");
+        cloud_step_ = std::max(1, static_cast<int>(
+            this->declare_parameter("cloud_downsample_step", 8)));
+        // 负障碍话题 (P1): base_link 系坑/下行台阶标记点, 跟随 enable_pointcloud 开关
+        neg_topic_ = this->declare_parameter("negative_topic", "/mechdog/negative_obstacles");
+
+        // ---- RGB 回传 (替代支架相机/USB 相机): Astra RGB -> sensor_msgs/Image ----
+        // 师兄的温度-视觉验证与 Foxglove 回传直接换图像源即可; Foxglove bridge 自带压缩.
+        // 注意: Astra RGB 仅真机模式有数据 (模拟模式 get_color_frame 返回无效), 但参数照常生效.
+        enable_rgb_ = this->declare_parameter("enable_rgb", false);
+        rgb_topic_ = this->declare_parameter("rgb_topic", "/mechdog/rgb/image_raw");
+        rgb_frame_ = this->declare_parameter("rgb_frame", "camera_link");
+        rgb_fps_ = std::max(1, static_cast<int>(
+            this->declare_parameter("rgb_fps", 10)));
+
         // ---- 初始化算法库 ----
         astra_ = std::make_unique<AstraProDriver>(use_simulated_);
         ultrasonic_ = std::make_unique<UltrasonicArrayDriver>(get_ultrasonic_layout());
@@ -66,22 +92,43 @@ public:
 
         astra_->start();
 
-        // H3: 融合移出 timer 线程 —— 真机 read_all 最坏 ~350-490ms (> 200ms 周期),
-        // 同步 fuse() 会让 timer 回调漂移累积、发布流跌破 5Hz 并逼近上游闸门 0.5s
-        // 超时 (机器人间歇零速)。独立融合线程持续 fuse() (周期 = read_all 耗时,
-        // 真机自然 ~3Hz; 模拟 ~8Hz), timer 200ms 只发布最新缓存结果:
-        // 发布流恒 5Hz, 闸门永不超时, 数据新鲜度最坏 ~350ms (步行速度可接受)。
+        // H3: 融合移出 timer 线程。真机 fuse() = read_all(3 颗前向) + 微秒级融合计算,
+        //   最坏 ~135ms (无回波或 echo 卡高, 均每颗 25ms×3 + 2×30ms 间隔; ALG-2 v2.3 校准,
+        //   measure_distance 两段忙等单次只超时其一, 非 50ms/颗; 原 350-490ms 偏高)。
+        //   虽 135ms < 200ms timer 周期, 仍独立线程: 发布恒 5Hz 不受 fuse 抖动影响,
+        //   且新鲜度看门狗 (800ms, ROS-4) 兜底 fuse 阻塞 (USB 断开等极端情形)。
+        //   模拟 ~60ms/16.7Hz, 真机典型 ~80-115ms/9-12Hz, 最坏 ~135ms/7.4Hz;
+        //   timer 200ms 只发布最新缓存, 新鲜度最坏 ~135ms (步行可接受)。
+        // ROS-2 (v2.2): 加 ≥100ms 最小周期门控, 防御性卫生 (避免后续简化传感器读后空转)。
+        // ROS-3 (v2.2): stop 检查置于写共享状态之前 —— 析构中 fuse 返回则不再触碰 latest_result_,
+        //   缩 detach UAF 窗口至"仅 fuse 阻塞中"的极端情形 (真机 USB 断开; 真正根治需可取消 I/O, 见 FIX_PLAN F10)。
         fusion_running_ = true;
         fusion_thread_ = std::thread([this]() {
+            constexpr auto kMinCycle = std::chrono::milliseconds(100);  // ROS-2
             while (true) {
+                auto t0 = std::chrono::steady_clock::now();
                 auto result = fusion_->fuse();
+                // ROS-3: 先判停止, 再决定是否写共享状态 (析构中不再访问成员)
+                if (!fusion_running_.load()) break;
                 {
                     std::lock_guard<std::mutex> lock(result_mutex_);
                     latest_result_ = result;
                     have_result_ = true;
                     last_fusion_update_ = std::chrono::steady_clock::now();
                 }
-                if (!fusion_running_.load()) break;  // 剩余一次 fuse 后立刻响应停止
+                // 近场点云: 跟随融合节拍发布 (融合线程独占相机读取; rclcpp publish 线程安全)
+                if (cloud_pub_) {
+                    publish_pointcloud();
+                }
+                // RGB 回传: 节流到目标帧率后发布 Astra 彩色帧 (同一驱动实例, 免抢相机)
+                if (rgb_pub_) {
+                    publish_rgb_if_due();
+                }
+                // ROS-2: 速率门控 (fuse 自身已含 read_all sleep, 但防御性兜底)
+                auto elapsed = std::chrono::steady_clock::now() - t0;
+                if (elapsed < kMinCycle) {
+                    std::this_thread::sleep_for(kMinCycle - elapsed);
+                }
             }
             // H5: 通知退出 (供 stop_fusion_thread 带超时等待, 避免 join 挂死)
             {
@@ -94,17 +141,36 @@ public:
         // ---- ROS2 接口 ----
         cmd_vel_pub_ = this->create_publisher<geometry_msgs::msg::Twist>(cmd_vel_topic_, 10);
         fusion_pub_ = this->create_publisher<std_msgs::msg::String>("fusion_result", 10);
+        if (enable_pointcloud_) {
+            cloud_pub_ = this->create_publisher<sensor_msgs::msg::PointCloud2>(cloud_topic_, 5);
+            neg_pub_ = this->create_publisher<sensor_msgs::msg::PointCloud2>(neg_topic_, 5);
+            RCLCPP_INFO(this->get_logger(),
+                "近场点云已启用: topic=%s frame=%s 下采样步长=%d (配合 static TF %s -> base_link)",
+                cloud_topic_.c_str(), cloud_frame_.c_str(), cloud_step_,
+                cloud_frame_.c_str());
+            RCLCPP_INFO(this->get_logger(),
+                "负障碍检测已启用: topic=%s frame=%s (P1 地面分割, 落差阈值 %.2fm)",
+                neg_topic_.c_str(), neg_frame_.c_str(), gseg_params_.cliff_drop_min);
+        }
+        if (enable_rgb_) {
+            rgb_pub_ = this->create_publisher<sensor_msgs::msg::Image>(rgb_topic_, 5);
+            RCLCPP_INFO(this->get_logger(),
+                "RGB 回传已启用: topic=%s frame=%s 目标帧率=%dfps (真机模式出图, 模拟模式无彩色帧)",
+                rgb_topic_.c_str(), rgb_frame_.c_str(), rgb_fps_);
+        }
 
         // 订阅师兄雷达 (可选, 当前仅记录日志)
         // QoS: sensor_data —— 与师兄 lidar_obstacle_node 一致 (rplidar_ros 发布 /scan 用 sensor_data)
         scan_sub_ = this->create_subscription<sensor_msgs::msg::LaserScan>(
             "scan", rclcpp::SensorDataQoS(),
             [this](const sensor_msgs::msg::LaserScan::SharedPtr msg) {
+                // ROS-5 (v2.2): 加锁保护 (原仅靠单线程 executor 隐式串行; 切多线程 executor 会竞争)
+                std::lock_guard<std::mutex> lk(scan_mutex_);
                 scan_ranges_ = msg->ranges;
             });
 
         // 方案A: 订阅独立 ultrasonic_node 的 /ultrasonic, 注入算法库 UltrasonicArrayDriver
-        // (替代算法库内部 GPIO 直读; 未收到/过期时 read_all 回退内部读取, fail-safe)
+        // (替代算法库内部 GPIO 直读; 未收到/过期时算法库 read_all 回退内部读取, fail-safe)
         ultra_sub_ = this->create_subscription<mechdog_ultrasonic::msg::UltrasonicArray>(
             "ultrasonic", rclcpp::SensorDataQoS(),
             [this](const mechdog_ultrasonic::msg::UltrasonicArray::SharedPtr msg) {
@@ -141,7 +207,8 @@ public:
 private:
     // H5 修复: 若融合线程已卡死在阻塞读 (C1 场景), 无超时 join() 会永久挂起 ->
     // 析构/spin 退出挂死。用带超时的 wait_for 等待退出通知, 超时则 detach 兜底。
-    // R2: 等待提到 2s —— 真机最坏 fuse() 周期 ~490ms, 正常退出远快于 2s; 2s 后仍
+    // R2: 等待提到 2s —— 真机最坏 fuse() 周期 ~135ms (ALG-2 v2.3 校准, 原 ~490ms 偏高),
+    //   正常退出远快于 2s; 2s 后仍
     // 未退说明线程真卡死在阻塞读, detach 概率近乎零。detach 的 UAF 窗口 (线程稍后从
     // 阻塞恢复会访问已析构 this) 因此也缩到仅剩"真卡死 + 进程已开始析构"的极端场景,
     // 由进程退出兜底 (OS 回收线程, 不再访问成员)。
@@ -163,6 +230,112 @@ private:
         if (fusion_thread_.joinable()) fusion_thread_.join();
     }
 
+    // 近场点云 (P3 起步): 深度帧反投影 -> camera_link 系降采样 PointCloud2.
+    // 由融合线程调用 (独占相机读取, 无跨线程共享, 无需加锁); rclcpp publish 线程安全.
+    // stamp 用发布时刻 (静态 TF 对任意时刻有效, Nav2 voxel_layer 按"最新观测"消费).
+    void publish_pointcloud() {
+        AstraFrame frame = astra_->get_latest_frame();
+        if (!frame.valid || frame.depth_map.empty() ||
+            frame.depth_width <= 0 || frame.depth_height <= 0) {
+            return;  // 首帧未就绪 / 真机帧失效 (H1 同口径)
+        }
+        PointCloud cloud_opt, cloud_link;
+        depth_to_cloud(frame.depth_map.data(), frame.depth_width,
+                       frame.depth_height, cloud_K_, cloud_opt);
+        transform_optical_to_link(cloud_opt, cloud_link);
+
+        // 降采样 + 序列化: x/y/z float32 + 4 字节 padding, point_step=16
+        const size_t total = cloud_link.points.size();
+        const size_t step = static_cast<size_t>(cloud_step_);
+        std::vector<Point3D> ds_points;
+        ds_points.reserve(total / step + 1);
+        for (size_t i = 0; i < total; i += step) {
+            ds_points.push_back(cloud_link.points[i]);
+        }
+        if (ds_points.empty()) return;  // 全无效深度, 无可发布
+        auto stamp = this->now();
+        cloud_pub_->publish(marshal_xyz(ds_points, cloud_frame_, stamp));
+
+        // 近场负障碍 (P1): base_link 系地面分割 → 坑/下行台阶标记点
+        // 注意: 分割用降采样云 (与发布同源), 全量 30 万点在 Pi 上 10Hz 扛不住
+        if (neg_pub_) {
+            PointCloud cloud_ds_link;
+            cloud_ds_link.seq = cloud_link.seq;
+            cloud_ds_link.stamp = cloud_link.stamp;
+            cloud_ds_link.frame_id = cloud_link.frame_id;
+            cloud_ds_link.points = ds_points;
+            PointCloud cloud_base;
+            transform_to_base(cloud_ds_link, cloud_E_, cloud_base);
+            GroundSegResult seg;
+            segment_ground(cloud_base, gseg_params_, seg);
+            if (!seg.negative_points.empty()) {
+                neg_pub_->publish(
+                    marshal_xyz(seg.negative_points, neg_frame_, stamp));
+            } else if (!seg.plane.valid && !use_simulated_) {
+                // 真机找不到地面平面 (俯仰/装高参数不对? 或镜头没对着地面) —— 节流提醒
+                RCLCPP_WARN_THROTTLE(this->get_logger(), *this->get_clock(), 10000,
+                    "地面平面拟合失败, 负障碍检测停用 (检查相机外参/ground_prior)");
+            }
+            // 模拟模式: 仿真数据是纯墙面无地面, plane 恒 invalid, 静默跳过
+        }
+    }
+
+    // xyz 点列 -> PointCloud2 (x/y/z float32 + 4 字节 padding, point_step=16)
+    static sensor_msgs::msg::PointCloud2 marshal_xyz(
+        const std::vector<Point3D>& pts, const std::string& frame,
+        const rclcpp::Time& stamp) {
+        sensor_msgs::msg::PointCloud2 msg;
+        msg.header.stamp = stamp;
+        msg.header.frame_id = frame;
+        msg.height = 1;
+        msg.width = static_cast<uint32_t>(pts.size());
+        msg.is_dense = true;
+        msg.is_bigendian = false;
+        msg.point_step = 16;
+        msg.row_step = msg.point_step * msg.width;
+        sensor_msgs::msg::PointField field;
+        field.datatype = sensor_msgs::msg::PointField::FLOAT32;
+        field.count = 1;
+        field.name = "x"; field.offset = 0; msg.fields.push_back(field);
+        field.name = "y"; field.offset = 4; msg.fields.push_back(field);
+        field.name = "z"; field.offset = 8; msg.fields.push_back(field);
+        msg.data.reserve(pts.size() * 16);
+        for (const auto& p : pts) {
+            const float xyz[4] = {static_cast<float>(p.x), static_cast<float>(p.y),
+                                  static_cast<float>(p.z), 0.0f};
+            const auto* bytes = reinterpret_cast<const uint8_t*>(xyz);
+            msg.data.insert(msg.data.end(), bytes, bytes + sizeof(xyz));
+        }
+        return msg;
+    }
+
+    // RGB 回传: Astra 彩色帧缓存 -> sensor_msgs/Image (rgb8). 按 rgb_fps 节流;
+    // 真机模式 get_color_frame 返回窗口线程同款彩色缓存, 模拟模式无彩色数据 (跳过).
+    void publish_rgb_if_due() {
+        auto now = std::chrono::steady_clock::now();
+        const auto min_interval =
+            std::chrono::duration<double>(1.0 / static_cast<double>(rgb_fps_));
+        if (last_rgb_pub_.time_since_epoch().count() != 0 &&
+            now - last_rgb_pub_ < min_interval) {
+            return;
+        }
+        ColorFrameData cf = astra_->get_color_frame();
+        if (!cf.valid || cf.rgb.empty() || cf.width <= 0 || cf.height <= 0) {
+            return;  // 模拟模式 / 彩色流未就绪
+        }
+        sensor_msgs::msg::Image msg;
+        msg.header.stamp = this->now();
+        msg.header.frame_id = rgb_frame_;
+        msg.height = static_cast<uint32_t>(cf.height);
+        msg.width = static_cast<uint32_t>(cf.width);
+        msg.encoding = "rgb8";
+        msg.is_bigendian = false;
+        msg.step = static_cast<uint32_t>(cf.width) * 3;
+        msg.data = std::move(cf.rgb);
+        rgb_pub_->publish(std::move(msg));
+        last_rgb_pub_ = now;
+    }
+
     void on_timer() {
         // 1. 取最新融合结果 (融合线程写, 本回调读, 锁保护)
         FusionResult result;
@@ -175,8 +348,8 @@ private:
             // 融合线程一旦静默卡死 (真机 USB 断开 / fuse() 阻塞 / 读传感器挂起),
             // 旧实现会以 5Hz 无限期发布同一份陈旧指令 (fail-unsafe: 上游闸门只判
             // "0.5s 内收到消息" 的链路存活, 无法识别内容过期)。
-            // R1: 阈值 800ms = 真机最坏 fuse() 周期 (~490ms) × ~1.6 裕量 —— 原 500ms
-            // 与上界贴边, 单次调度抖动超 500ms 会触发假性零速 (安全侧但间歇停摆)。
+            // R1: 阈值 800ms ≈ 真机最坏 fuse() 周期 (~135ms, ALG-2 v2.3 校准) × 5.9 裕量 —— 原 500ms
+            //   与旧上界 (~490ms) 贴边, 单次调度抖动超 500ms 会触发假性零速 (安全侧但间歇停摆)。
             auto now = std::chrono::steady_clock::now();
             fresh = (now - last_fusion_update_) <= std::chrono::milliseconds(800);
             if (fresh) {
@@ -193,30 +366,38 @@ private:
         } else {
             cmd.linear = 0.0; cmd.angular = 0.0;
             RCLCPP_WARN_THROTTLE(this->get_logger(), *this->get_clock(), 2000,
-                "融合结果陈旧(>500ms), 发布安全零速 (疑似融合线程卡死)");
+                "融合结果陈旧(>800ms), 发布安全零速 (疑似融合线程卡死)");  // ROS-4 v2.2: 文案与 800ms 阈值对齐
         }
 
-        // 3. 发布速度指令 (double -> float 显式窄化, 消除隐式转换警告)
+        // 3. 发布速度指令 (geometry_msgs Twist 字段为 float64, 直接赋值即可;
+        //    原先的 static_cast<float> 反而引入无谓的 float32 精度损失)
         auto twist = geometry_msgs::msg::Twist();
-        twist.linear.x = static_cast<float>(cmd.linear);
-        twist.angular.z = static_cast<float>(cmd.angular);
+        twist.linear.x = cmd.linear;
+        twist.angular.z = cmd.angular;
         cmd_vel_pub_->publish(twist);
 
         // 4. 发布融合结果 (JSON 字符串, 调试/巡检决策)
-        auto msg = std_msgs::msg::String();
-        msg.data = fusion_to_json(result, cmd);
-        fusion_pub_->publish(msg);
+        //    仅 fresh 时发布: 陈旧时 result 是默认空值 (action=FORWARD/min_fwd=8.0), 与零速 cmd 矛盾,
+        //    会误导 /fusion_result 消费者。陈旧由 RCLCPP_WARN_THROTTLE 日志 + 零速 cmd 表达。
+        if (fresh) {
+            auto msg = std_msgs::msg::String();
+            msg.data = fusion_to_json(result, cmd);
+            fusion_pub_->publish(msg);
+        }
 
         // 5. 日志 (5Hz 节流: 每 10 帧打一次, 即每 2 秒)
         if (++tick_ % 10 == 0) {
+            // ROS-5: 加锁读 scan_ranges_ (与 /scan 回调同锁, 不再隐式依赖单线程 executor)
+            size_t scan_n;
+            { std::lock_guard<std::mutex> lk(scan_mutex_); scan_n = scan_ranges_.size(); }
             RCLCPP_INFO(this->get_logger(),
-                "env=%d cliff=%s min_fwd=%.2fm action=%d vel=(%.2f, %.2f) scan=%zu",
-                static_cast<int>(result.environment),
+                "env=%s cliff=%s min_fwd=%.2fm action=%s vel=(%.2f, %.2f) scan=%zu",
+                env_to_str(result.environment),
                 result.cliff_detected ? "YES" : "no",
                 result.min_forward_distance_m,
-                static_cast<int>(result.recommended_action),
+                action_to_str(result.recommended_action),  // ROS-6 v2.2: 枚举改字符串名
                 cmd.linear, cmd.angular,
-                scan_ranges_.size());
+                scan_n);
         }
     }
 
@@ -243,6 +424,9 @@ private:
     // ROS2 接口
     rclcpp::Publisher<geometry_msgs::msg::Twist>::SharedPtr cmd_vel_pub_;
     rclcpp::Publisher<std_msgs::msg::String>::SharedPtr fusion_pub_;
+    rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr cloud_pub_;
+    rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr neg_pub_;
+    rclcpp::Publisher<sensor_msgs::msg::Image>::SharedPtr rgb_pub_;
     rclcpp::Subscription<sensor_msgs::msg::LaserScan>::SharedPtr scan_sub_;
     rclcpp::Subscription<mechdog_ultrasonic::msg::UltrasonicArray>::SharedPtr ultra_sub_;
     rclcpp::TimerBase::SharedPtr timer_;
@@ -250,18 +434,63 @@ private:
     bool use_simulated_ = true;
     std::string cmd_vel_topic_ = "/unsafe/cmd_vel";
     unsigned int tick_ = 0;
-    // 注: scan_ranges_ 由 /scan 回调写、timer 回调读, 单线程 executor 下串行安全;
-    //     若改多线程 executor 需加锁
-    std::vector<float> scan_ranges_;  // 雷达数据缓存 (预留)
+    // ROS-5 (v2.2): scan_ranges_ 加显式锁 (原仅靠单线程 executor 隐式串行, 现显式保护)
+    std::mutex scan_mutex_;
+    std::vector<float> scan_ranges_;  // 雷达数据缓存 (预留; /scan 回调写, on_timer 读)
+
+    // 近场点云 (P3): 参数 + 内参 (FOV 反推, 真机标定后改 SDK 直读, 见设计文档 §3.2)
+    bool enable_pointcloud_ = false;
+    std::string cloud_topic_ = "/mechdog/point_cloud";
+    std::string cloud_frame_ = "camera_link";
+    int cloud_step_ = 8;
+    CameraIntrinsics cloud_K_;
+
+    // 负障碍 (P1): 地面分割参数取算法库默认 (GroundSegConfig), 手持实验改 config.h
+    std::string neg_topic_ = "/mechdog/negative_obstacles";
+    std::string neg_frame_ = "base_link";
+    CameraExtrinsics cloud_E_;    // 外参占位值 (装机量测后与 launch TF 同步更新)
+    GroundSegParams gseg_params_;
+
+    // RGB 回传 (替代支架相机): 参数 + 发布节流状态 (仅融合线程访问, 无需锁)
+    bool enable_rgb_ = false;
+    std::string rgb_topic_ = "/mechdog/rgb/image_raw";
+    std::string rgb_frame_ = "camera_link";
+    int rgb_fps_ = 10;
+    std::chrono::steady_clock::time_point last_rgb_pub_{};
+
+    // ROS-6 (v2.2): 枚举改字符串名 (原 JSON 内嵌 int, 消费者需对照源码枚举值, 易错)
+    static const char* env_to_str(EnvironmentType e) {
+        switch (e) {
+            case EnvironmentType::INDOOR:      return "INDOOR";
+            case EnvironmentType::SEMI_INDOOR:return "SEMI_INDOOR";
+            case EnvironmentType::OUTDOOR:    return "OUTDOOR";
+            default:                          return "UNKNOWN";
+        }
+    }
+    static const char* action_to_str(NavigationAction a) {
+        switch (a) {
+            case NavigationAction::STOP:        return "STOP";
+            case NavigationAction::BACKWARD:     return "BACKWARD";
+            case NavigationAction::TURN_LEFT:    return "TURN_LEFT";
+            case NavigationAction::TURN_RIGHT:   return "TURN_RIGHT";
+            case NavigationAction::SLOW_FORWARD: return "SLOW_FORWARD";
+            case NavigationAction::FORWARD:      return "FORWARD";
+            case NavigationAction::REACHED_GOAL:  return "REACHED_GOAL";
+            default:                             return "UNKNOWN";
+        }
+    }
 
     // 融合结果 -> JSON (供 /fusion_result 调试与巡检决策)
     static std::string fusion_to_json(const FusionResult& r, const VelocityCmd& v) {
         std::ostringstream oss;
-        oss << "{\"timestamp\":" << r.timestamp
-            << ",\"environment\":" << static_cast<int>(r.environment)
+        // P3: 默认 6 位有效数字会把 epoch 秒 (~1.79e9) 截到小时级分辨率 (实测 1.78793e+09);
+        //     统一 fixed(3): 时间戳毫秒级, 其余数值字段三位小数 (m/s / rad/s 分辨率足够)
+        oss << std::fixed << std::setprecision(3)
+            << "{\"timestamp\":" << r.timestamp
+            << ",\"environment\":\"" << env_to_str(r.environment) << "\""
             << ",\"cliff\":" << (r.cliff_detected ? "true" : "false")
             << ",\"min_fwd_m\":" << r.min_forward_distance_m
-            << ",\"action\":" << static_cast<int>(r.recommended_action)
+            << ",\"action\":\"" << action_to_str(r.recommended_action) << "\""
             << ",\"astra_w\":" << r.effective_astra_weight
             << ",\"ultra_w\":" << r.effective_ultrasonic_weight
             << ",\"vx\":" << v.linear
@@ -272,7 +501,11 @@ private:
 
 int main(int argc, char** argv) {
     rclcpp::init(argc, argv);
-    rclcpp::spin(std::make_shared<SafetyNode>());
+    // ROS-5 (v2.2): 显式单线程 executor (scan_ranges_ 已加锁, 双重保险; 文档化不依赖隐式串行)
+    rclcpp::executors::SingleThreadedExecutor exec;
+    auto node = std::make_shared<SafetyNode>();
+    exec.add_node(node);
+    exec.spin();
     rclcpp::shutdown();
     return 0;
 }

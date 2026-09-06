@@ -54,9 +54,8 @@ public:
 
     /** 发送速度指令到底盘 */
     virtual void send_velocity(double linear, double angular) = 0;
-
-    /** 按名称创建桥接实现 (simulated / stm32) */
-    static std::unique_ptr<ChassisBridge> create(const std::string& type);
+    // ROS-8 (v2.2): 删除未用的 create() 工厂方法 —— chassis_bridge_node 直接构造具体实现
+    // (create 不传 port/baud, 且全库无调用方); 如需工厂可在节点层包一层带参构造
 };
 
 /**
@@ -65,9 +64,14 @@ public:
 class SimulatedChassisBridge : public ChassisBridge {
 public:
     void send_velocity(double linear, double angular) override {
-        std::cout << "[ChassisBridge:simulated] vx=" << linear
-                  << " m/s, wz=" << angular << " rad/s" << std::endl;
+        // ROS-9 (v2.2): 每帧 cout 刷屏 -> 每 25 帧 (约 5s @5Hz) 打一次
+        if (++tick_ % 25 == 0) {
+            std::cout << "[ChassisBridge:simulated] vx=" << linear
+                      << " m/s, wz=" << angular << " rad/s" << std::endl;
+        }
     }
+private:
+    unsigned int tick_ = 0;
 };
 
 /**
@@ -141,11 +145,14 @@ public:
                 std::cerr << "[ChassisBridge:stm32] 串口写失败/短写 (重试后仍失败): "
                           << sizeof(frame) << " 字节" << std::endl;
             }
-            std::cout << "[ChassisBridge:stm32] vx=" << linear
-                      << " wz=" << angular
-                      << " RPM(L=" << left_rpm << ",R=" << right_rpm << ")"
-                      << " frame=" << (int)frame[2] << "/" << (int)frame[20]
-                      << std::endl;
+            // ROS-9 (v2.2): 成功路径每帧 cout 刷屏 -> 每 25 帧 (约 5s @5Hz) 打一次
+            if (++ok_tick_ % 25 == 0) {
+                std::cout << "[ChassisBridge:stm32] vx=" << linear
+                          << " wz=" << angular
+                          << " RPM(L=" << left_rpm << ",R=" << right_rpm << ")"
+                          << " frame=" << (int)frame[2] << "/" << (int)frame[20]
+                          << std::endl;
+            }
         } else {
             // Low 修复: 串口未打开时避免每帧 (5Hz) cerr 刷屏 -- 每 25 帧打一次 (约 5s)
             ++not_open_count_;
@@ -193,6 +200,7 @@ private:
     // Low: 串口未打开时的节流刷屏计数
     unsigned int not_open_tick_ = 0;
     unsigned long not_open_count_ = 0;
+    unsigned int ok_tick_ = 0;  // ROS-9: 成功路径节流计数
 
     double mps_to_rpm(double v) const {
         if (wheel_radius_m_ <= 0.0) return 0.0;
@@ -300,12 +308,7 @@ private:
     intptr_t fd_ = -1;
 };
 
-inline std::unique_ptr<ChassisBridge> ChassisBridge::create(const std::string& type) {
-    if (type == "stm32") {
-        return std::make_unique<Stm32ChassisBridge>();
-    }
-    // 默认 simulated
-    return std::make_unique<SimulatedChassisBridge>();
-}
+// ROS-8 (v2.2): ChassisBridge::create() 已删除 (未用, 且不传 port/baud);
+// 节点 (chassis_bridge_node.cpp) 直接按 bridge_type 参数构造具体实现
 
 } // namespace mechdog_ros
