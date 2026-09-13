@@ -46,6 +46,9 @@ add_library(mechdog_algo OBJECT
   ${MECHDOG_ALGO_DIR}/path_planner.cpp
   ${MECHDOG_ALGO_DIR}/point_cloud.cpp
   ${MECHDOG_ALGO_DIR}/ground_segmentation.cpp
+  # 路1: 近场地形避障 —— sensor_fusion.cpp 现在调用 2.5D 的
+  # scan_corridor/scan_corridor_points/merge_corridor, 缺此文件会链接失败
+  ${MECHDOG_ALGO_DIR}/heightmap_2d5.cpp
 )
 target_include_directories(mechdog_algo PRIVATE ${MECHDOG_ALGO_DIR})
 target_compile_features(mechdog_algo PRIVATE cxx_std_20)
@@ -59,9 +62,9 @@ target_include_directories(safety_node PRIVATE
 target_link_libraries(safety_node
   mechdog_algo
   rclcpp::rclcpp
-  std_msgs::std_msgs
-  geometry_msgs::geometry_msgs
-  sensor_msgs::sensor_msgs
+  ${std_msgs_TARGETS}
+  ${geometry_msgs_TARGETS}
+  ${sensor_msgs_TARGETS}
 )
 # 方案A: mechdog_ultrasonic 消息包依赖 —— ament_target_dependencies 负责 include + 消息 typesupport 链接
 ament_target_dependencies(safety_node mechdog_ultrasonic)
@@ -91,7 +94,7 @@ target_include_directories(chassis_bridge_node PRIVATE
 )
 target_link_libraries(chassis_bridge_node
   rclcpp::rclcpp
-  geometry_msgs::geometry_msgs
+  ${geometry_msgs_TARGETS}
 )
 target_compile_features(chassis_bridge_node PRIVATE cxx_std_20)
 
@@ -109,7 +112,7 @@ target_include_directories(mapping_demo_node PRIVATE
 )
 target_link_libraries(mapping_demo_node
   rclcpp::rclcpp
-  nav_msgs::nav_msgs
+  ${nav_msgs_TARGETS}
 )
 target_compile_features(mapping_demo_node PRIVATE cxx_std_20)
 

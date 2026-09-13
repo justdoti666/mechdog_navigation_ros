@@ -49,6 +49,7 @@
 #include "path_planner.h"
 #include "point_cloud.h"
 #include "ground_segmentation.h"
+#include "heightmap_2d5.h"     // 路1: 近场地形避障 (P1.5 2.5D 禁行格 → 融合决策)
 #include "safety_warmup.hpp"   // R4 (REVIEW): 启动预热 —— 等 bottom 首帧再首轮 fuse
 
 using namespace mechdog;
@@ -126,6 +127,9 @@ public:
                     have_result_ = true;
                     last_fusion_update_ = std::chrono::steady_clock::now();
                 }
+                // 近场感知: **每轮都更新** (与是否发布点云解耦) —— 路1 的避坑决策要靠它;
+                // 原来只在 cloud_pub_ 存在时才跑分割, 会让"避坑"静默依赖可视化开关。
+                update_perception();
                 // 近场点云: 跟随融合节拍发布 (融合线程独占相机读取; rclcpp publish 线程安全)
                 if (cloud_pub_) {
                     publish_pointcloud();
@@ -241,12 +245,18 @@ private:
     }
 
     // 近场点云 (P3 起步): 深度帧反投影 -> camera_link 系降采样 PointCloud2.
-    // 由融合线程调用 (独占相机读取, 无跨线程共享, 无需加锁); rclcpp publish 线程安全.
-    // stamp 用发布时刻 (静态 TF 对任意时刻有效, Nav2 voxel_layer 按"最新观测"消费).
-    void publish_pointcloud() {
+    // 近场感知更新 (每轮融合节拍调用, **与是否发布点云解耦**):
+    //   depth → cloud(optical→link) → 下采样 → base 系 → 地面分割(P1) → 2.5D(P1.5)
+    //   → 路1: fusion_->set_local_terrain(hm, seg)  近场走廊有坑/台阶 → STOP / 降速让开
+    // 缓存 cloud_ds_link_ / cloud_base_ / seg_ 供 publish_pointcloud() 复用
+    // (同一份云 + 同一份分割, 不重复跑 RANSAC, 也不出现"发布一套、决策另一套")。
+    // 由融合线程调用 (独占相机读取, 无跨线程共享, 无需加锁)。
+    void update_perception() {
+        have_perception_ = false;
         AstraFrame frame = astra_->get_latest_frame();
         if (!frame.valid || frame.depth_map.empty() ||
             frame.depth_width <= 0 || frame.depth_height <= 0) {
+            fusion_->clear_local_terrain();   // 无帧 → 不注入地形 (行为回到接入路1之前)
             return;  // 首帧未就绪 / 真机帧失效 (H1 同口径)
         }
         PointCloud cloud_opt, cloud_link;
@@ -254,30 +264,46 @@ private:
                        frame.depth_height, cloud_K_, cloud_opt);
         transform_optical_to_link(cloud_opt, cloud_link);
 
-        // 降采样 + 序列化: x/y/z float32 + 4 字节 padding, point_step=16
+        // 下采样 (发布与分割同源): 全量 30 万点在 Pi 上 10Hz 扛不住
         const size_t total = cloud_link.points.size();
         const size_t step = static_cast<size_t>(cloud_step_);
-        std::vector<Point3D> ds_points;
-        ds_points.reserve(total / step + 1);
+        cloud_ds_link_ = PointCloud{};
+        cloud_ds_link_.seq = cloud_link.seq;
+        cloud_ds_link_.stamp = cloud_link.stamp;
+        cloud_ds_link_.frame_id = cloud_link.frame_id;
+        cloud_ds_link_.points.reserve(total / step + 1);
         for (size_t i = 0; i < total; i += step) {
-            ds_points.push_back(cloud_link.points[i]);
+            cloud_ds_link_.points.push_back(cloud_link.points[i]);
         }
-        if (ds_points.empty()) return;  // 全无效深度, 无可发布
+        if (cloud_ds_link_.points.empty()) {
+            fusion_->clear_local_terrain();
+            return;  // 全无效深度
+        }
+
+        transform_to_base(cloud_ds_link_, cloud_E_, cloud_base_);
+        segment_ground(cloud_base_, gseg_params_, seg_);
+
+        // ---- 路1: 近场地形 → 融合决策 (P1 负障碍点 + P1.5 禁行格) ----
+        HeightMap25Config hcfg;
+        HeightMap25Result hm;
+        build_heightmap_25(cloud_base_, seg_, hcfg, hm);
+        fusion_->set_local_terrain(hm, seg_);
+
+        have_perception_ = true;
+    }
+
+    // 近场点云 + 负障碍发布 (使用 update_perception() 的缓存; 由融合线程调用,
+    // rclcpp publish 线程安全; stamp 用发布时刻 —— 静态 TF 对任意时刻有效,
+    // Nav2 voxel_layer 按"最新观测"消费)
+    void publish_pointcloud() {
+        if (!have_perception_ || cloud_ds_link_.points.empty()) return;
         auto stamp = this->now();
-        cloud_pub_->publish(marshal_xyz(ds_points, cloud_frame_, stamp));
+        cloud_pub_->publish(marshal_xyz(cloud_ds_link_.points, cloud_frame_, stamp));
 
         // 近场负障碍 (P1): base_link 系地面分割 → 坑/下行台阶标记点
         // 注意: 分割用降采样云 (与发布同源), 全量 30 万点在 Pi 上 10Hz 扛不住
         if (neg_pub_) {
-            PointCloud cloud_ds_link;
-            cloud_ds_link.seq = cloud_link.seq;
-            cloud_ds_link.stamp = cloud_link.stamp;
-            cloud_ds_link.frame_id = cloud_link.frame_id;
-            cloud_ds_link.points = ds_points;
-            PointCloud cloud_base;
-            transform_to_base(cloud_ds_link, cloud_E_, cloud_base);
-            GroundSegResult seg;
-            segment_ground(cloud_base, gseg_params_, seg);
+            const GroundSegResult& seg = seg_;
             if (!seg.negative_points.empty()) {
                 neg_pub_->publish(
                     marshal_xyz(seg.negative_points, neg_frame_, stamp));
@@ -462,6 +488,13 @@ private:
     std::string neg_frame_ = "base_link";
     CameraExtrinsics cloud_E_;    // 外参占位值 (装机量测后与 launch TF 同步更新)
     GroundSegParams gseg_params_;
+
+    // 路1: 近场感知缓存 (由 update_perception() 每轮刷新, publish_pointcloud() 复用)
+    //   口径: 与发布同一份下采样云 + 同一份地面分割结果 (避免重复 RANSAC / 双份真相)
+    PointCloud cloud_ds_link_;    // 发布用 (camera_link 系)
+    PointCloud cloud_base_;       // 分割/2.5D 用 (base_link 系)
+    GroundSegResult seg_;         // P1 地面分割 (含 negative_points)
+    bool have_perception_ = false;
 
     // RGB 回传 (替代支架相机): 参数 + 发布节流状态 (仅融合线程访问, 无需锁)
     bool enable_rgb_ = false;
