@@ -149,6 +149,12 @@ if(BUILD_TESTING)
   if(TARGET test_ultrasonic_source)
     target_include_directories(test_ultrasonic_source PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
   endif()
+
+  # v2.6: 相机几何 → 地面高度先验 (纯函数; 台架 0.6m / 装机 0.2m 只差一个参数)
+  ament_add_gtest(test_sensor_geometry test/test_sensor_geometry.cpp)
+  if(TARGET test_sensor_geometry)
+    target_include_directories(test_sensor_geometry PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
+  endif()
 endif()
 
 ament_package()

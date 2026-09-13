@@ -53,6 +53,7 @@
 #include "point_cloud.h"
 #include "ground_segmentation.h"
 #include "heightmap_2d5.h"     // 路1: 近场地形避障 (P1.5 2.5D 禁行格 → 融合决策)
+#include "sensor_geometry.hpp"     // v2.6: 相机几何 → 地面高度先验
 #include "safety_warmup.hpp"   // R4 (REVIEW): 启动预热 —— 等 bottom 首帧再首轮 fuse
 #include "ultrasonic_source.hpp"   // v2.5: 超声来源解析 (真机拒绝模拟随机数)
 
@@ -104,6 +105,43 @@ public:
             this->declare_parameter("allow_simulated_ultrasonic", false);
         ultrasonic_timeout_ms_ = std::max(50, static_cast<int>(
             this->declare_parameter("ultrasonic_timeout_ms", 500)));
+
+        // ---- 相机几何 (v2.6): 台架 0.6m / 装机 0.18~0.2m —— **一处配置, 不再写死** ----
+        // 动因 (真机实测 2026-09-13): ground_prior_z(-0.18) 是装机值 (假设相机离地 18cm);
+        //   台架把相机架在 0.6m 时真地面落在先验窗之外 → 拟合器锁到别的面 →
+        //   2.5D known/traversable 全部失去意义 (同帧实测: 先验 -0.18 → 可通行 0/35;
+        //   先验 -0.6 → 可通行 22/35, 真地面在相机下方 0.657m)。
+        // camera_height_m: 相机镜头离**地面**的高度; >0 时推导 ground_prior_z =
+        //   -(camera_height_m - cloud_z) (见 src/sensor_geometry.hpp); 默认 -1 = 沿用装机默认
+        // ground_prior_z / ground_prior_window: 直接指定 (优先于推导)
+        // cloud_x/cloud_z/cloud_pitch_rad: 算法侧外参 —— 与 launch 的静态 TF **同源**,
+        //   顺手修掉"TF 用 launch 值、算法用硬编码默认值"的不一致
+        cloud_x_         = this->declare_parameter("cloud_x", 0.12);
+        cloud_z_         = this->declare_parameter("cloud_z", 0.18);
+        cloud_pitch_rad_ = this->declare_parameter("cloud_pitch_rad", 0.2617994);
+        camera_height_m_ = this->declare_parameter("camera_height_m", -1.0);
+        prior_window_m_  = this->declare_parameter("ground_prior_window", -1.0);
+        const double prior_override = this->declare_parameter("ground_prior_z", -999.0);
+
+        cloud_E_.x     = cloud_x_;
+        cloud_E_.y     = 0.0;
+        cloud_E_.z     = cloud_z_;
+        cloud_E_.roll  = 0.0;
+        cloud_E_.pitch = cloud_pitch_rad_;
+        cloud_E_.yaw   = 0.0;
+        if (prior_override > -900.0) {
+            gseg_params_.ground_prior_z = prior_override;
+        } else if (camera_height_m_ > 0.0) {
+            gseg_params_.ground_prior_z =
+                mechdog_ros::derived_ground_prior_z(camera_height_m_, cloud_z_);
+        }
+        if (prior_window_m_ > 0.0) gseg_params_.prior_window = prior_window_m_;
+        RCLCPP_INFO(this->get_logger(),
+            "相机几何: 离地 %.2fm%s 外参 x=%.2f z=%.2f pitch=%.4frad → 地面高度先验 z=%.3f (±%.2f) "
+            "[台架: camera_height_m:=0.6 cloud_z:=0 | 装机: 改回 0.2]",
+            camera_height_m_, camera_height_m_ > 0.0 ? "" : "(未设, 用仓库默认)",
+            cloud_E_.x, cloud_E_.z, cloud_E_.pitch,
+            gseg_params_.ground_prior_z, gseg_params_.prior_window);
 
         // ---- 深度来源 (v2.4): 无 Astra SDK 的机器 (如 Pi 5B) 用 ROS 话题喂深度 ----
         // 背景: safety_node 原本只能用 AstraProDriver 直读 SDK (真机) 或模拟帧;
@@ -707,6 +745,13 @@ private:
     PointCloud cloud_base_;       // 分割/2.5D 用 (base_link 系)
     GroundSegResult seg_;         // P1 地面分割 (含 negative_points)
     bool have_perception_ = false;
+
+    // ---- 相机几何 (v2.6) ----
+    double cloud_x_ = 0.12;              // 算法侧外参 (与 launch 静态 TF 同源)
+    double cloud_z_ = 0.18;
+    double cloud_pitch_rad_ = 0.2617994; // 15°
+    double camera_height_m_ = -1.0;      // 相机镜头离地高 (>0 时推导地面高度先验)
+    double prior_window_m_ = -1.0;       // 地面高度先验半带宽 (<=0 = 用仓库默认)
 
     // ---- 超声来源 (v2.5): 拒绝把模拟随机数喂进安全链 ----
     std::string ultrasonic_requested_ = "auto";   // 用户请求值

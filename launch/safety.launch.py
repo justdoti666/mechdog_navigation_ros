@@ -72,6 +72,17 @@ def generate_launch_description():
         DeclareLaunchArgument(
             'ultrasonic_timeout_ms', default_value='500',
             description='超声话题超时 (ms): 超过则把超声移出安全链 (避免回落模拟随机数)'),
+        DeclareLaunchArgument(
+            'camera_height_m', default_value='-1.0',
+            description='相机镜头离**地面**高度(m): >0 时推导地面高度先验 = -(h - camera_z)。'
+                        '台架(相机架高约 0.6m)用 camera_height_m:=0.6 camera_z:=0；'
+                        '装机后改回 0.2；-1 = 用仓库装机默认(-0.18)'),
+        DeclareLaunchArgument(
+            'ground_prior_z', default_value='-999.0',
+            description='直接指定地面高度先验 (优先于 camera_height_m 推导); -999 = 不指定'),
+        DeclareLaunchArgument(
+            'ground_prior_window', default_value='-1.0',
+            description='地面高度先验半带宽(m); <=0 = 用仓库默认(0.10)'),
         Node(
             package='mechdog_navigation_ros',
             executable='safety_node',
@@ -88,6 +99,13 @@ def generate_launch_description():
                 'ultrasonic_source': LaunchConfiguration('ultrasonic_source'),
                 'allow_simulated_ultrasonic': LaunchConfiguration('allow_simulated_ultrasonic'),
                 'ultrasonic_timeout_ms': LaunchConfiguration('ultrasonic_timeout_ms'),
+                # v2.6: 算法侧外参与静态 TF **同源** (修掉"TF 用 launch 值/算法用硬编码")
+                'cloud_x': LaunchConfiguration('camera_x'),
+                'cloud_z': LaunchConfiguration('camera_z'),
+                'cloud_pitch_rad': LaunchConfiguration('camera_pitch_rad'),
+                'camera_height_m': LaunchConfiguration('camera_height_m'),
+                'ground_prior_z': LaunchConfiguration('ground_prior_z'),
+                'ground_prior_window': LaunchConfiguration('ground_prior_window'),
             }],
         ),
         # 近场点云坐标: base_link -> camera_link 静态变换 (roll/pitch/yaw 弧度;
