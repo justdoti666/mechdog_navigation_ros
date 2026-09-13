@@ -54,6 +54,7 @@
 #include "ground_segmentation.h"
 #include "heightmap_2d5.h"     // 路1: 近场地形避障 (P1.5 2.5D 禁行格 → 融合决策)
 #include "safety_warmup.hpp"   // R4 (REVIEW): 启动预热 —— 等 bottom 首帧再首轮 fuse
+#include "ultrasonic_source.hpp"   // v2.5: 超声来源解析 (真机拒绝模拟随机数)
 
 using namespace mechdog;
 using namespace std::chrono_literals;
@@ -92,6 +93,18 @@ public:
         rgb_fps_ = std::max(1, static_cast<int>(
             this->declare_parameter("rgb_fps", 10)));
 
+        // ---- 超声来源 (v2.5): 真机上绝不允许"静默的模拟随机数"进安全链 ----
+        // 背景: Pi 上没编 USE_WIRINGPI → 超声驱动是编译期模拟器, 数据带 valid=true,
+        //   且模拟器"底部 5% 概率造悬崖" → 实测 5.7% 帧假 STOP。
+        // auto(默认): use_simulated→simulated; /ultrasonic 有发布者→topic;
+        //             GPIO 就绪→hardware; 都不满足→none (警告, 仅深度工作)
+        // 其余取值: none | topic | hardware | simulated(仅台架)
+        ultrasonic_requested_ = this->declare_parameter("ultrasonic_source", std::string("auto"));
+        allow_simulated_ultrasonic_ =
+            this->declare_parameter("allow_simulated_ultrasonic", false);
+        ultrasonic_timeout_ms_ = std::max(50, static_cast<int>(
+            this->declare_parameter("ultrasonic_timeout_ms", 500)));
+
         // ---- 深度来源 (v2.4): 无 Astra SDK 的机器 (如 Pi 5B) 用 ROS 话题喂深度 ----
         // 背景: safety_node 原本只能用 AstraProDriver 直读 SDK (真机) 或模拟帧;
         //   Pi 上没有 Orbbec Astra SDK, 但已有 ros2_astra_camera 在发深度话题 →
@@ -115,6 +128,35 @@ public:
         ultrasonic_ = std::make_unique<UltrasonicArrayDriver>(get_ultrasonic_layout());
         ir_ = std::make_unique<InfraRedSensor>(use_simulated_);
         fusion_ = std::make_unique<SensorFusion>(astra_.get(), ultrasonic_.get(), ir_.get());
+
+        // ---- 超声来源解析 (v2.5): 先解析, 再决定是否把超声接进安全链 ----
+        {
+            const std::size_t pubs = this->count_publishers("ultrasonic");
+            const bool hw_ok = ultrasonic_->is_hardware_available();
+            ultrasonic_source_ = mechdog_ros::resolve_ultrasonic_source(
+                ultrasonic_requested_, use_simulated_, hw_ok, pubs, allow_simulated_ultrasonic_);
+            ultrasonic_enabled_ = (ultrasonic_source_ != "none");
+            fusion_->set_ultrasonic_enabled(ultrasonic_enabled_);
+
+            if (ultrasonic_source_ == "none") {
+                RCLCPP_WARN(this->get_logger(),
+                    "超声来源=none: 已从安全链**移除**超声 (不参与融合, 也不作悬崖判定)。"
+                    "原因: 请求=%s 硬件(GPIO)=%d /ultrasonic 发布者=%zu —— "
+                    "驱动回落的是**模拟随机数**(带 valid=true, 底部还有 5%% 概率造悬崖), "
+                    "绝不允许它参与安全决策。恢复途径: 让 ultrasonic_node 发布 /ultrasonic, "
+                    "或在 Pi 上编 USE_WIRINGPI 接真实 GPIO, 或(仅台架) "
+                    "allow_simulated_ultrasonic:=true。",
+                    ultrasonic_requested_.c_str(), static_cast<int>(hw_ok), pubs);
+            } else if (ultrasonic_source_ == "simulated" && !use_simulated_) {
+                RCLCPP_WARN(this->get_logger(),
+                    "超声来源=simulated (真实模式下显式允许): 融合结果含**随机模拟数据**, "
+                    "仅供台架验证, 不可据此判断真机安全行为。");
+            }
+            RCLCPP_INFO(this->get_logger(),
+                "超声来源: %s (请求=%s GPIO=%d /ultrasonic 发布者=%zu 超时=%dms)",
+                ultrasonic_source_.c_str(), ultrasonic_requested_.c_str(),
+                static_cast<int>(hw_ok), pubs, ultrasonic_timeout_ms_);
+        }
         planner_ = std::make_unique<PathPlanner>();
 
         // ---- 深度来源解析 + 启动 (v2.4) ----
@@ -173,6 +215,23 @@ public:
                 *ultrasonic_, std::chrono::milliseconds(warmup_ms_));
             while (true) {
                 auto t0 = std::chrono::steady_clock::now();
+                // v2.5: 超声话题超时 → 把超声移出安全链。
+                // 为什么不是"继续用旧帧": 不注入新鲜数据时, 算法库 read_all 会**回退到
+                // 内部模拟随机数** (带 valid=true, 底部 5% 造悬崖), 那比"没有超声"更危险。
+                if (ultrasonic_enabled_ && ultrasonic_source_ == "topic" && have_ultra_rx_) {
+                    const auto age_ms =
+                        std::chrono::duration_cast<std::chrono::milliseconds>(
+                            std::chrono::steady_clock::now() - last_ultra_rx_).count();
+                    if (age_ms > ultrasonic_timeout_ms_) {
+                        have_ultra_rx_ = false;
+                        ultrasonic_enabled_ = false;
+                        fusion_->set_ultrasonic_enabled(false);
+                        RCLCPP_WARN(this->get_logger(),
+                            "/ultrasonic 已 %ld ms 无数据 → 超声退出安全链 "
+                            "(避免回落模拟随机数; 数据恢复后自动接回)",
+                            static_cast<long>(age_ms));
+                    }
+                }
                 // v2.4: 深度话题超时看门狗 —— 源断了就把帧标记失效 (fail-closed):
                 //   不这么做的话, 最后一帧会被无限复用 (假"看得见"), 比看不见更危险。
                 if (have_depth_rx_) {
@@ -280,6 +339,18 @@ public:
                 d.front_right = to_reading(msg->front_right_cm, msg->front_right_valid);
                 d.bottom = to_reading(msg->bottom_cm, msg->bottom_valid);
                 ultrasonic_->inject_external_data(d);
+
+                // v2.5: 记录新鲜度 + 恢复入口 —— 真数据到了就把超声重新接回安全链
+                last_ultra_rx_ = std::chrono::steady_clock::now();
+                have_ultra_rx_ = true;
+                if (!ultrasonic_enabled_ && (ultrasonic_requested_ == "auto" ||
+                                             ultrasonic_requested_ == "topic")) {
+                    ultrasonic_source_ = "topic";
+                    ultrasonic_enabled_ = true;
+                    fusion_->set_ultrasonic_enabled(true);
+                    RCLCPP_WARN(this->get_logger(),
+                        "/ultrasonic 数据已到达 → 超声重新接入安全链 (来源=topic)");
+                }
             });
 
         // 定时器: 5Hz 发布最新融合结果 (融合本身在独立线程, 见上 H3 说明)
@@ -636,6 +707,15 @@ private:
     PointCloud cloud_base_;       // 分割/2.5D 用 (base_link 系)
     GroundSegResult seg_;         // P1 地面分割 (含 negative_points)
     bool have_perception_ = false;
+
+    // ---- 超声来源 (v2.5): 拒绝把模拟随机数喂进安全链 ----
+    std::string ultrasonic_requested_ = "auto";   // 用户请求值
+    std::string ultrasonic_source_ = "auto";      // 解析后的实际来源
+    bool        ultrasonic_enabled_ = true;       // 是否接在安全链上
+    bool        allow_simulated_ultrasonic_ = false;
+    int         ultrasonic_timeout_ms_ = 500;
+    bool        have_ultra_rx_ = false;
+    std::chrono::steady_clock::time_point last_ultra_rx_{};
 
     // 深度来源 (v2.4): depth_source=topic 时的订阅与新鲜度状态
     std::string depth_source_ = "auto";

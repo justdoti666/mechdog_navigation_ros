@@ -143,6 +143,12 @@ if(BUILD_TESTING)
     ${CMAKE_CURRENT_SOURCE_DIR}/src)
   target_compile_features(test_safety_fail_closed PRIVATE cxx_std_20)
   target_link_libraries(test_safety_fail_closed mechdog_algo)
+
+  # v2.5: 超声来源解析 (纯函数, 只依赖自身头文件)
+  ament_add_gtest(test_ultrasonic_source test/test_ultrasonic_source.cpp)
+  if(TARGET test_ultrasonic_source)
+    target_include_directories(test_ultrasonic_source PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
+  endif()
 endif()
 
 ament_package()

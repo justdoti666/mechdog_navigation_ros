@@ -61,6 +61,17 @@ def generate_launch_description():
         DeclareLaunchArgument(
             'depth_timeout_ms', default_value='500',
             description='深度话题超时 (ms): 超过则标记深度帧失效 (fail-closed, 决策只剩超声)'),
+        DeclareLaunchArgument(
+            'ultrasonic_source', default_value='auto',
+            description='超声来源: auto(有/ultrasonic发布者→topic; GPIO就绪→hardware; 否则→none) | '
+                        'topic | hardware | simulated(仅台架) | none。'
+                        '真机上**绝不**静默使用模拟随机数 (底部 5% 概率造悬崖 → 假 STOP)'),
+        DeclareLaunchArgument(
+            'allow_simulated_ultrasonic', default_value='false',
+            description='台架调试用: 允许真实模式下把模拟超声接进安全链 (默认拒绝)'),
+        DeclareLaunchArgument(
+            'ultrasonic_timeout_ms', default_value='500',
+            description='超声话题超时 (ms): 超过则把超声移出安全链 (避免回落模拟随机数)'),
         Node(
             package='mechdog_navigation_ros',
             executable='safety_node',
@@ -74,6 +85,9 @@ def generate_launch_description():
                 'depth_source': LaunchConfiguration('depth_source'),
                 'depth_topic': LaunchConfiguration('depth_topic'),
                 'depth_timeout_ms': LaunchConfiguration('depth_timeout_ms'),
+                'ultrasonic_source': LaunchConfiguration('ultrasonic_source'),
+                'allow_simulated_ultrasonic': LaunchConfiguration('allow_simulated_ultrasonic'),
+                'ultrasonic_timeout_ms': LaunchConfiguration('ultrasonic_timeout_ms'),
             }],
         ),
         # 近场点云坐标: base_link -> camera_link 静态变换 (roll/pitch/yaw 弧度;
