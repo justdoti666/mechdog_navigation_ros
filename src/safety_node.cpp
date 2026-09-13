@@ -121,6 +121,11 @@ public:
         cloud_pitch_rad_ = this->declare_parameter("cloud_pitch_rad", 0.2617994);
         camera_height_m_ = this->declare_parameter("camera_height_m", -1.0);
         prior_window_m_  = this->declare_parameter("ground_prior_window", -1.0);
+        // v2.7: 地面提取方法 cell(确定性格最小拟合)|ransac; 默认 ransac = 与历史行为一致
+        this->declare_parameter("ground_fit_method", std::string("ransac"));
+        // 切换点: 必须在构造函数里赋值 (成员声明区不能写语句 —— 踩过, 构建报 code 2)
+        gseg_params_.use_cell_min_fit =
+            (this->get_parameter("ground_fit_method").as_string() == "cell");
         const double prior_override = this->declare_parameter("ground_prior_z", -999.0);
 
         cloud_E_.x     = cloud_x_;

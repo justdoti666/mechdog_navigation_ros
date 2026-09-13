@@ -83,6 +83,9 @@ def generate_launch_description():
         DeclareLaunchArgument(
             'ground_prior_window', default_value='-1.0',
             description='地面高度先验半带宽(m); <=0 = 用仓库默认(0.10)'),
+        DeclareLaunchArgument(
+            'ground_fit_method', default_value='ransac',
+            description='v2.7 地面提取方法: ransac(默认, 与历史一致) | cell(确定性格最小拟合)'),
         Node(
             package='mechdog_navigation_ros',
             executable='safety_node',
@@ -106,6 +109,7 @@ def generate_launch_description():
                 'camera_height_m': LaunchConfiguration('camera_height_m'),
                 'ground_prior_z': LaunchConfiguration('ground_prior_z'),
                 'ground_prior_window': LaunchConfiguration('ground_prior_window'),
+                'ground_fit_method': LaunchConfiguration('ground_fit_method'),
             }],
         ),
         # 近场点云坐标: base_link -> camera_link 静态变换 (roll/pitch/yaw 弧度;
