@@ -20,6 +20,8 @@
  * 运行: ros2 run mechdog_navigation_ros safety_node
  *       # 若想直接接管 /cmd_vel (不经闸门, 仅测试): --ros-args -p cmd_vel_topic:=/cmd_vel
  */
+#include <cstring>
+#include <cmath>
 #include <chrono>
 #include <condition_variable>
 #include <iomanip>
@@ -36,6 +38,7 @@
 #include "sensor_msgs/msg/laser_scan.hpp"
 #include "sensor_msgs/msg/point_cloud2.hpp"
 #include "sensor_msgs/msg/image.hpp"
+#include "sensor_msgs/msg/camera_info.hpp"
 #include "std_msgs/msg/string.hpp"
 
 // 方案A: 订阅独立 ultrasonic_node 发布的 /ultrasonic (mechdog_ultrasonic 包的消息)
@@ -89,6 +92,24 @@ public:
         rgb_fps_ = std::max(1, static_cast<int>(
             this->declare_parameter("rgb_fps", 10)));
 
+        // ---- 深度来源 (v2.4): 无 Astra SDK 的机器 (如 Pi 5B) 用 ROS 话题喂深度 ----
+        // 背景: safety_node 原本只能用 AstraProDriver 直读 SDK (真机) 或模拟帧;
+        //   Pi 上没有 Orbbec Astra SDK, 但已有 ros2_astra_camera 在发深度话题 →
+        //   本参数让节点订阅话题并把帧注入驱动, 下游 (融合/点云/2.5D/路1) 完全不变。
+        //   "auto"      : use_simulated=true → simulated; 否则 编译了 SDK → sdk / 未编译 → topic
+        //   "topic"     : 订阅 depth_topic (16UC1/mono16/32FC1) → inject_depth_frame
+        //                 (不启动 SDK 采集线程 —— 否则注入帧会被采集线程覆盖)
+        //   "sdk"       : Astra SDK 直读 (需 USE_ASTRA_SDK 编译)
+        //   "simulated" : 模拟帧
+        depth_source_ = this->declare_parameter("depth_source", std::string("auto"));
+        depth_topic_ = this->declare_parameter("depth_topic",
+            std::string("/camera/depth/image_raw"));
+        depth_info_topic_ = this->declare_parameter("depth_info_topic",
+            std::string("/camera/depth/camera_info"));
+        // 话题超时 (ms): 超过则把深度帧标记为失效 (fail-closed, 只留超声) —— 不让旧帧继续参与决策
+        depth_timeout_ms_ = std::max(50, static_cast<int>(
+            this->declare_parameter("depth_timeout_ms", 500)));
+
         // ---- 初始化算法库 ----
         astra_ = std::make_unique<AstraProDriver>(use_simulated_);
         ultrasonic_ = std::make_unique<UltrasonicArrayDriver>(get_ultrasonic_layout());
@@ -96,7 +117,41 @@ public:
         fusion_ = std::make_unique<SensorFusion>(astra_.get(), ultrasonic_.get(), ir_.get());
         planner_ = std::make_unique<PathPlanner>();
 
-        astra_->start();
+        // ---- 深度来源解析 + 启动 (v2.4) ----
+        if (depth_source_ == "auto") {
+#if defined(USE_ASTRA_SDK)
+            depth_source_ = use_simulated_ ? "simulated" : "sdk";
+#else
+            depth_source_ = use_simulated_ ? "simulated" : "topic";
+#endif
+        }
+        if (depth_source_ == "sdk") {
+#if !defined(USE_ASTRA_SDK)
+            RCLCPP_WARN(this->get_logger(),
+                "depth_source=sdk 但本二进制未编译 Astra SDK (USE_ASTRA_SDK=OFF) → 深度恒无效; "
+                "真机请用 depth_source:=topic");
+#endif
+        }
+        if (depth_source_ == "topic" && !use_simulated_) {
+            auto qos = rclcpp::SensorDataQoS();   // 图像话题惯例: best effort
+            depth_sub_ = this->create_subscription<sensor_msgs::msg::Image>(
+                depth_topic_, qos,
+                [this](sensor_msgs::msg::Image::SharedPtr m) { on_depth_image(std::move(m)); });
+            depth_info_sub_ = this->create_subscription<sensor_msgs::msg::CameraInfo>(
+                depth_info_topic_, qos,
+                [this](sensor_msgs::msg::CameraInfo::SharedPtr m) { on_depth_info(std::move(m)); });
+            RCLCPP_INFO(this->get_logger(),
+                "深度来源: ROS 话题 %s (内参 %s, 超时 %d ms) —— 不启动 Astra SDK 采集线程",
+                depth_topic_.c_str(), depth_info_topic_.c_str(), depth_timeout_ms_);
+        } else {
+            if (depth_source_ == "topic") {
+                RCLCPP_WARN(this->get_logger(),
+                    "depth_source=topic 但 use_simulated=true → 模拟模式不订阅深度话题; "
+                    "真机请设 use_simulated:=false depth_source:=topic");
+            }
+            astra_->start();   // simulated / sdk: 驱动自带采集线程
+            RCLCPP_INFO(this->get_logger(), "深度来源: %s", depth_source_.c_str());
+        }
 
         // H3: 融合移出 timer 线程。真机 fuse() = read_all(3 颗前向) + 微秒级融合计算,
         //   最坏 ~135ms (无回波或 echo 卡高, 均每颗 25ms×3 + 2×30ms 间隔; ALG-2 v2.3 校准,
@@ -118,9 +173,33 @@ public:
                 *ultrasonic_, std::chrono::milliseconds(warmup_ms_));
             while (true) {
                 auto t0 = std::chrono::steady_clock::now();
+                // v2.4: 深度话题超时看门狗 —— 源断了就把帧标记失效 (fail-closed):
+                //   不这么做的话, 最后一帧会被无限复用 (假"看得见"), 比看不见更危险。
+                if (have_depth_rx_) {
+                    const auto age_ms =
+                        std::chrono::duration_cast<std::chrono::milliseconds>(
+                            std::chrono::steady_clock::now() - last_depth_rx_).count();
+                    if (age_ms > depth_timeout_ms_) {
+                        astra_->invalidate_frame();
+                        have_depth_rx_ = false;   // 只失效一次, 避免每轮刷屏
+                        RCLCPP_WARN(this->get_logger(),
+                            "深度话题 %s 已 %ld ms 无数据 → 深度帧标记失效 "
+                            "(fail-closed, 决策仅剩超声)",
+                            depth_topic_.c_str(), static_cast<long>(age_ms));
+                    }
+                }
                 auto result = fusion_->fuse();
                 // ROS-3: 先判停止, 再决定是否写共享状态 (析构中不再访问成员)
                 if (!fusion_running_.load()) break;
+                // 路1: 近场地形状态变化时提示 (与核心仓 main.cpp 同口径, 便于真机排查)
+                if (result.terrain_block_near || result.terrain_block_mid) {
+                    RCLCPP_WARN_THROTTLE(this->get_logger(), *this->get_clock(), 2000,
+                        "路1 近场地形禁行: near=%d mid=%d 最近 x=%.2fm → 动作 %s",
+                        static_cast<int>(result.terrain_block_near),
+                        static_cast<int>(result.terrain_block_mid),
+                        result.terrain_block_x_m,
+                        action_to_str(result.recommended_action));
+                }
                 {
                     std::lock_guard<std::mutex> lock(result_mutex_);
                     latest_result_ = result;
@@ -245,6 +324,56 @@ private:
     }
 
     // 近场点云 (P3 起步): 深度帧反投影 -> camera_link 系降采样 PointCloud2.
+    // ---- v2.4 深度话题源 (depth_source=topic) ----
+    // 深度图 → uint16(mm) → 注入驱动 (区域分析/环境判定走驱动内部同一链路)。
+    // 支持 16UC1/mono16 (mm) 与 32FC1 (m); 其他编码节流告警后丢弃。
+    void on_depth_image(sensor_msgs::msg::Image::SharedPtr msg) {
+        const int w = static_cast<int>(msg->width);
+        const int h = static_cast<int>(msg->height);
+        if (w <= 0 || h <= 0) return;
+        const size_t need = static_cast<size_t>(w) * static_cast<size_t>(h);
+        std::vector<uint16_t> buf(need, 0);
+        const std::string& enc = msg->encoding;
+        if (enc == "16UC1" || enc == "mono16") {
+            if (msg->data.size() < need * 2) return;
+            std::memcpy(buf.data(), msg->data.data(), need * 2);
+        } else if (enc == "32FC1") {
+            if (msg->data.size() < need * 4) return;
+            const float* src = reinterpret_cast<const float*>(msg->data.data());
+            for (size_t i = 0; i < need; ++i) {
+                const float m = src[i];
+                buf[i] = (std::isfinite(m) && m > 0.0f)
+                             ? static_cast<uint16_t>(m * 1000.0f + 0.5f) : 0;
+            }
+        } else {
+            RCLCPP_WARN_THROTTLE(this->get_logger(), *this->get_clock(), 5000,
+                "深度话题编码不支持: %s (仅 16UC1/mono16/32FC1)", enc.c_str());
+            return;
+        }
+        const double stamp_s = static_cast<double>(msg->header.stamp.sec)
+                             + static_cast<double>(msg->header.stamp.nanosec) * 1e-9;
+        if (astra_->inject_depth_frame(buf, w, h, stamp_s)) {
+            last_depth_rx_ = std::chrono::steady_clock::now();
+            have_depth_rx_ = true;
+        }
+    }
+
+    // 深度内参话题 → 替换 FOV 反推内参 (点云 / 2.5D / 路1 全部受益)
+    void on_depth_info(sensor_msgs::msg::CameraInfo::SharedPtr msg) {
+        if (msg->k[0] > 0.0 && msg->k[4] > 0.0) {
+            cloud_K_.fx = msg->k[0];
+            cloud_K_.fy = msg->k[4];
+            cloud_K_.cx = msg->k[2];
+            cloud_K_.cy = msg->k[5];
+            if (!have_camera_info_) {
+                have_camera_info_ = true;
+                RCLCPP_INFO(this->get_logger(),
+                    "深度内参已从话题读取: fx=%.2f fy=%.2f cx=%.2f cy=%.2f",
+                    cloud_K_.fx, cloud_K_.fy, cloud_K_.cx, cloud_K_.cy);
+            }
+        }
+    }
+
     // 近场感知更新 (每轮融合节拍调用, **与是否发布点云解耦**):
     //   depth → cloud(optical→link) → 下采样 → base 系 → 地面分割(P1) → 2.5D(P1.5)
     //   → 路1: fusion_->set_local_terrain(hm, seg)  近场走廊有坑/台阶 → STOP / 降速让开
@@ -288,6 +417,18 @@ private:
         HeightMap25Result hm;
         build_heightmap_25(cloud_base_, seg_, hcfg, hm);
         fusion_->set_local_terrain(hm, seg_);
+
+        // 诊断 (真机排查): 平面 / 2.5D / 负障碍 状态。
+        // 没有这条日志时, "路1 一声不吭"只能靠猜 —— fail-closed 静默是安全设计,
+        // 但排查时必须能看到"为什么静默"(无平面? 走廊空? 还是根本没跑到这里)。
+        RCLCPP_INFO_THROTTLE(this->get_logger(), *this->get_clock(), 3000,
+            "感知: 点云=%zu 平面valid=%d tilt=%.2f° h0=%.3fm 内点=%zu neg=%zu | 2.5D %s",
+            cloud_base_.points.size(), static_cast<int>(seg_.plane.valid),
+            std::acos(std::min(1.0, std::max(-1.0, static_cast<double>(seg_.plane.nz)))) *
+                180.0 / 3.14159265358979323846,
+            static_cast<double>(seg_.plane.height_at_origin()),
+            static_cast<size_t>(seg_.plane.inliers), seg_.negative_points.size(),
+            hm.valid ? hm.stats().c_str() : "invalid (无平面→fail-closed, 路1 静默)");
 
         have_perception_ = true;
     }
@@ -495,6 +636,17 @@ private:
     PointCloud cloud_base_;       // 分割/2.5D 用 (base_link 系)
     GroundSegResult seg_;         // P1 地面分割 (含 negative_points)
     bool have_perception_ = false;
+
+    // 深度来源 (v2.4): depth_source=topic 时的订阅与新鲜度状态
+    std::string depth_source_ = "auto";
+    std::string depth_topic_ = "/camera/depth/image_raw";
+    std::string depth_info_topic_ = "/camera/depth/camera_info";
+    int  depth_timeout_ms_ = 500;
+    bool have_depth_rx_ = false;       // 收到过话题帧 (供超时看门狗判断)
+    bool have_camera_info_ = false;
+    std::chrono::steady_clock::time_point last_depth_rx_{};
+    rclcpp::Subscription<sensor_msgs::msg::Image>::SharedPtr depth_sub_;
+    rclcpp::Subscription<sensor_msgs::msg::CameraInfo>::SharedPtr depth_info_sub_;
 
     // RGB 回传 (替代支架相机): 参数 + 发布节流状态 (仅融合线程访问, 无需锁)
     bool enable_rgb_ = false;

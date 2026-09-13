@@ -76,6 +76,71 @@ TEST(SafetyFailClosed, WarmupWaitsForBottomReady) {
     EXPECT_TRUE(ready);   // 若 sim bottom 线程异常未产出, 此处失败即暴露
 }
 
+// v2.4: 外部注入深度帧 (depth_source=topic) —— 无 Astra SDK 的机器 (如 Pi 5B) 靠它把
+//   真深度 (ros2_astra_camera 的话题) 送进融合/点云/2.5D/路1, 全程不依赖 SDK。
+TEST(DepthTopicSource, InjectedFrameDrivesFusionAndFailsClosed) {
+    AstraProDriver astra(false);       // 真机模式但**不 start()** (topic 源由话题驱动)
+    UltrasonicArrayDriver ultrasonic(get_ultrasonic_layout());
+    InfraRedSensor ir(true);
+    SensorFusion fusion(&astra, &ultrasonic, &ir);
+
+    // 1) 未注入 → 帧无效 (fail-closed)
+    EXPECT_FALSE(astra.get_latest_frame().valid);
+
+    // 2) 注入 1.0m 的"墙" → 帧有效 + 区域分析给出 ~1.0m
+    std::vector<uint16_t> wall(640 * 480, 1000);
+    ASSERT_TRUE(astra.inject_depth_frame(wall, 640, 480, 100.0));
+    auto f = astra.get_latest_frame();
+    ASSERT_TRUE(f.valid);
+    EXPECT_EQ(f.depth_width, 640);
+    EXPECT_EQ(f.depth_height, 480);
+    EXPECT_GT(f.center_region.valid_pixel_ratio, 0.9);
+    EXPECT_NEAR(f.center_region.min_distance_m, 1.0, 0.05);
+
+    // 3) 值域过滤与 capture_real 同口径: 10cm (<600mm) → 全是无效像素
+    std::vector<uint16_t> too_near(640 * 480, 100);
+    ASSERT_TRUE(astra.inject_depth_frame(too_near, 640, 480, 101.0));
+    EXPECT_DOUBLE_EQ(astra.get_latest_frame().center_region.valid_pixel_ratio, 0.0);
+
+    // 4) 尺寸/长度非法 → 拒绝 (原帧保持不动, 不污染)
+    EXPECT_FALSE(astra.inject_depth_frame(too_near, 0, 480, 102.0));
+    EXPECT_FALSE(astra.inject_depth_frame(std::vector<uint16_t>(10, 1000), 640, 480, 102.0));
+
+    // 5) 有效注入 + 前向超声全无效 → 融合必须看到 ~1m 前向障碍 (不是 8.0m 兜底)
+    //    注意: bottom 必须注入"有效且贴地" —— 若连 bottom 也注无效, is_fall_risk()
+    //    会按 fail-closed 判"有风险" → cliff_detected=true → STOP (悬崖层的正确行为,
+    //    但那不是本用例要验的东西)。
+    ASSERT_TRUE(astra.inject_depth_frame(wall, 640, 480, 103.0));
+    UltrasonicArrayData ud;
+    ud.timestamp = 0.0;
+    ud.front_left.valid = ud.front_center.valid = ud.front_right.valid = false;
+    const double inv_cm = UltrasonicConfig::kUltrasonicInvalidM * 100;
+    ud.front_left.distance_cm = ud.front_center.distance_cm = inv_cm;
+    ud.front_right.distance_cm = inv_cm;
+    ud.bottom.valid = true;
+    ud.bottom.distance_cm = 15.0;            // 贴地 (<=30cm) → 无悬崖风险
+    ultrasonic.inject_external_data(ud);
+
+    auto r = fusion.fuse();
+    EXPECT_TRUE(r.sensors_valid);
+    EXPECT_FALSE(r.cliff_detected);
+    EXPECT_NEAR(r.obstacles.at("center").astra_dist_m, 1.0, 0.05);
+    EXPECT_LT(r.min_forward_distance_m, 1.2);
+    EXPECT_EQ(r.recommended_action, NavigationAction::FORWARD);  // 1m 开阔 → 前进 (非 STOP)
+
+    // 6) 源断开 (话题超时) → invalidate_frame → 深度退出融合 → 全失效 STOP (fail-closed)
+    astra.invalidate_frame();
+    EXPECT_FALSE(astra.get_latest_frame().valid);
+    UltrasonicArrayData all_bad = ud;
+    all_bad.front_left.valid = all_bad.front_center.valid = all_bad.front_right.valid = false;
+    all_bad.bottom.valid = false;            // bottom 也断 → fail-closed
+    all_bad.bottom.distance_cm = inv_cm;
+    ultrasonic.inject_external_data(all_bad);
+    auto r2 = fusion.fuse();
+    EXPECT_FALSE(r2.sensors_valid);
+    EXPECT_EQ(r2.recommended_action, NavigationAction::STOP);
+}
+
 int main(int argc, char** argv) {
     ::testing::InitGoogleTest(&argc, argv);
     return RUN_ALL_TESTS();

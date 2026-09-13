@@ -50,6 +50,17 @@ def generate_launch_description():
             'enable_rgb', default_value='false',
             description='RGB 回传: safety_node 发布 Astra 彩色帧到 /mechdog/rgb/image_raw '
                         '(替代支架相机/USB 相机, 供温度-视觉验证与 Foxglove 回传; 真机出图)'),
+        DeclareLaunchArgument(
+            'depth_source', default_value='auto',
+            description='深度来源: auto=sdk(编译了 SDK)/topic(未编译, 如 Pi) | '
+                        'topic=订阅 ROS 深度话题 (无需 Astra SDK) | sdk=Astra SDK 直读 | '
+                        'simulated=模拟帧'),
+        DeclareLaunchArgument(
+            'depth_topic', default_value='/camera/depth/image_raw',
+            description='depth_source=topic 时的深度话题 (16UC1/mono16/32FC1)'),
+        DeclareLaunchArgument(
+            'depth_timeout_ms', default_value='500',
+            description='深度话题超时 (ms): 超过则标记深度帧失效 (fail-closed, 决策只剩超声)'),
         Node(
             package='mechdog_navigation_ros',
             executable='safety_node',
@@ -60,6 +71,9 @@ def generate_launch_description():
                 'cmd_vel_topic': LaunchConfiguration('cmd_vel_topic'),
                 'enable_pointcloud': LaunchConfiguration('enable_pointcloud'),
                 'enable_rgb': LaunchConfiguration('enable_rgb'),
+                'depth_source': LaunchConfiguration('depth_source'),
+                'depth_topic': LaunchConfiguration('depth_topic'),
+                'depth_timeout_ms': LaunchConfiguration('depth_timeout_ms'),
             }],
         ),
         # 近场点云坐标: base_link -> camera_link 静态变换 (roll/pitch/yaw 弧度;
