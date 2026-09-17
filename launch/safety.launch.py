@@ -84,6 +84,9 @@ def generate_launch_description():
             'ground_prior_window', default_value='-1.0',
             description='地面高度先验半带宽(m); <=0 = 用仓库默认(0.10)'),
         DeclareLaunchArgument(
+            'camera_roll_rad', default_value='0.0',
+            description='v2.8 相机安装横滚(弧度); 竖墙标定给出 (台架实测 -0.041)'),
+        DeclareLaunchArgument(
             'ground_fit_method', default_value='ransac',
             description='v2.7 地面提取方法: ransac(默认, 与历史一致) | cell(确定性格最小拟合)'),
         Node(
@@ -106,6 +109,7 @@ def generate_launch_description():
                 'cloud_x': LaunchConfiguration('camera_x'),
                 'cloud_z': LaunchConfiguration('camera_z'),
                 'cloud_pitch_rad': LaunchConfiguration('camera_pitch_rad'),
+                'cloud_roll_rad': LaunchConfiguration('camera_roll_rad'),
                 'camera_height_m': LaunchConfiguration('camera_height_m'),
                 'ground_prior_z': LaunchConfiguration('ground_prior_z'),
                 'ground_prior_window': LaunchConfiguration('ground_prior_window'),

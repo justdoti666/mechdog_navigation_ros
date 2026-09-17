@@ -119,6 +119,9 @@ public:
         cloud_x_         = this->declare_parameter("cloud_x", 0.12);
         cloud_z_         = this->declare_parameter("cloud_z", 0.18);
         cloud_pitch_rad_ = this->declare_parameter("cloud_pitch_rad", 0.2617994);
+        // v2.8: 安装横滚 —— "镜头平行地面"是硬规格(pitch=0), 横滚由**竖墙标定**给出
+        //   (wall_calib: 竖直面法向的仰角 = roll 偏差; 台架实测 +2.35° ⇒ -0.041 rad)
+        const double cloud_roll_rad = this->declare_parameter("cloud_roll_rad", 0.0);
         camera_height_m_ = this->declare_parameter("camera_height_m", -1.0);
         prior_window_m_  = this->declare_parameter("ground_prior_window", -1.0);
         // v2.7: 地面提取方法 cell(确定性格最小拟合)|ransac; 默认 ransac = 与历史行为一致
@@ -131,7 +134,7 @@ public:
         cloud_E_.x     = cloud_x_;
         cloud_E_.y     = 0.0;
         cloud_E_.z     = cloud_z_;
-        cloud_E_.roll  = 0.0;
+        cloud_E_.roll  = cloud_roll_rad;   // v2.8 竖墙标定值
         cloud_E_.pitch = cloud_pitch_rad_;
         cloud_E_.yaw   = 0.0;
         if (prior_override > -900.0) {
