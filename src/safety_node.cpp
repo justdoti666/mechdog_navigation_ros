@@ -28,6 +28,8 @@
 #include <memory>
 #include <sstream>
 #include <string>
+#include <array>                            // v2.8.2 汇报可视化用
+#include <std_msgs/msg/string.hpp>          // v2.8.2 状态栏
 #include <atomic>
 #include <mutex>
 #include <thread>
@@ -546,6 +548,55 @@ private:
         HeightMap25Result hm;
         build_heightmap_25(cloud_base_, seg_, hcfg, hm);
         fusion_->set_local_terrain(hm, seg_);
+
+        // ---- v2.8.2 汇报用可视化: 发布 2.5D 可行度图 + 状态文本 ----
+        //   (画面上的可行度图 = 节点真实决策依据, 不是事后重算, 汇报口径最硬)
+        if (hm.valid && hm.cols > 0 && hm.rows > 0) {
+            static rclcpp::Publisher<sensor_msgs::msg::Image>::SharedPtr tpub;
+            static rclcpp::Publisher<std_msgs::msg::String>::SharedPtr spub;
+            if (!tpub) tpub = this->create_publisher<sensor_msgs::msg::Image>("/safety/terrain_map", 1);
+            if (!spub) spub = this->create_publisher<std_msgs::msg::String>("/safety/status_text", 1);
+            const int sc = 4;                       // 放大倍数
+            const int W = hm.rows * sc, H = hm.cols * sc;   // 横轴=x(前进), 纵轴=y
+            sensor_msgs::msg::Image img;
+            img.header.stamp = this->now();
+            img.header.frame_id = "base_link";
+            img.height = H; img.width = W; img.encoding = "rgb8";
+            img.is_bigendian = 0; img.step = W * 3;
+            img.data.assign(static_cast<size_t>(W) * H * 3, 0);
+            auto color_of = [](CellFlag f) -> std::array<uint8_t, 3> {
+                switch (f) {
+                    case CellFlag::Traversable: return {40, 200, 60};     // 绿=可通行
+                    case CellFlag::ObstacleUp:  return {220, 50, 40};     // 红=凸起
+                    case CellFlag::CliffDown:   return {40, 110, 220};    // 蓝=坑
+                    case CellFlag::TooSteep:    return {230, 140, 20};    // 橙=过陡
+                    default:                    return {45, 45, 45};      // 深灰=未知
+                }
+            };
+            for (int r = 0; r < hm.rows; ++r) {
+                for (int c = 0; c < hm.cols; ++c) {
+                    const auto col = color_of(hm.flag[static_cast<size_t>(r) * hm.cols + c]);
+                    for (int dy = 0; dy < sc; ++dy) {
+                        for (int dx = 0; dx < sc; ++dx) {
+                            const int x = r * sc + dx, y = c * sc + dy;
+                            const size_t o = (static_cast<size_t>(y) * W + x) * 3;
+                            img.data[o] = col[0]; img.data[o + 1] = col[1]; img.data[o + 2] = col[2];
+                        }
+                    }
+                }
+            }
+            tpub->publish(img);
+            std_msgs::msg::String s;
+            char buf[512];
+            std::snprintf(buf, sizeof(buf),
+                "trav=%d  up=%d  down=%d  steep=%d   unknown=%d/4848  |  plane tilt=%.1f deg  h0=%.2fm",
+                hm.count_traversable, hm.count_up, hm.count_down, hm.count_steep, hm.count_unknown,
+                std::acos(std::min(1.0, std::max(-1.0, static_cast<double>(seg_.plane.nz)))) *
+                    180.0 / 3.14159265358979323846,
+                static_cast<double>(seg_.plane.height_at_origin()));
+            s.data = buf;
+            spub->publish(s);
+        }
 
         // 诊断 (真机排查): 平面 / 2.5D / 负障碍 状态。
         // 没有这条日志时, "路1 一声不吭"只能靠猜 —— fail-closed 静默是安全设计,
