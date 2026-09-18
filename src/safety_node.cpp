@@ -526,7 +526,19 @@ private:
             return;  // 全无效深度
         }
 
-        transform_to_base(cloud_ds_link_, cloud_E_, cloud_base_);
+        // v2.8.1 修复(关键): transform_to_base 内部已含 optical→link (point_cloud.cpp:112),
+        //   所以**不能**把 link 系点云再喂给它 —— 那会转两次, base 系前后/上下颠倒。
+        //   实测症状: 地板 z 最低只有 -0.56m(相机离地0.9m)、known 恒 55/4848、倾角乱跳、trav 恒 0。
+        //   这里另做一份"光学系下采样"专供感知; 发布用的 cloud_ds_link_ 保持原样(逐点等价)。
+        PointCloud cloud_ds_opt;
+        cloud_ds_opt.seq = cloud_link.seq;
+        cloud_ds_opt.stamp = cloud_link.stamp;
+        cloud_ds_opt.frame_id = cloud_link.frame_id;
+        cloud_ds_opt.points.reserve(total / step + 1);
+        for (size_t i = 0; i < total; i += step) {
+            cloud_ds_opt.points.push_back(cloud_opt.points[i]);
+        }
+        transform_to_base(cloud_ds_opt, cloud_E_, cloud_base_);
         segment_ground(cloud_base_, gseg_params_, seg_);
 
         // ---- 路1: 近场地形 → 融合决策 (P1 负障碍点 + P1.5 禁行格) ----
