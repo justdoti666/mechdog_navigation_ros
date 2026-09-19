@@ -82,6 +82,8 @@ public:
         enable_pointcloud_ = this->declare_parameter("enable_pointcloud", false);
         cloud_topic_ = this->declare_parameter("cloud_topic", "/mechdog/point_cloud");
         cloud_frame_ = this->declare_parameter("cloud_frame", "camera_link");
+        // v2.8.3: 网格收敛到视场楔形 (只改统计口径, 判据/格数不变)
+        grid_wedge_only_ = this->declare_parameter("grid_wedge_only", true);
         cloud_step_ = std::max(1, static_cast<int>(
             this->declare_parameter("cloud_downsample_step", 8)));
         // 负障碍话题 (P1): base_link 系坑/下行台阶标记点, 跟随 enable_pointcloud 开关
@@ -545,6 +547,11 @@ private:
 
         // ---- 路1: 近场地形 → 融合决策 (P1 负障碍点 + P1.5 禁行格) ----
         HeightMap25Config hcfg;
+        // v2.8.3: 网格收敛到视场楔形 —— 只改"未知率"的统计口径, 判据/可行性格数不变。
+        //   实机同帧验证(real_test_16, 几何修复后): 楔形内 known 801/2228,
+        //   **楔形外被排除的 known = 0**(一个都不丢) ⇒ 分母从 4848 收到 2228 更诚实。
+        //   (几何修复前曾测得 0/2228, 那是 base 系双转 bug 的症状, 非楔形问题)
+        hcfg.wedge_only = grid_wedge_only_;
         HeightMap25Result hm;
         build_heightmap_25(cloud_base_, seg_, hcfg, hm);
         fusion_->set_local_terrain(hm, seg_);
@@ -799,6 +806,7 @@ private:
 
     // 近场点云 (P3): 参数 + 内参 (FOV 反推, 真机标定后改 SDK 直读, 见设计文档 §3.2)
     bool enable_pointcloud_ = false;
+    bool grid_wedge_only_ = true;   // v2.8.3 视场楔形(仅统计口径: in_fov/覆盖率)
     std::string cloud_topic_ = "/mechdog/point_cloud";
     std::string cloud_frame_ = "camera_link";
     int cloud_step_ = 8;
