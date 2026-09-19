@@ -596,8 +596,9 @@ private:
             std_msgs::msg::String s;
             char buf[512];
             std::snprintf(buf, sizeof(buf),
-                "trav=%d  up=%d  down=%d  steep=%d   unknown=%d/4848  |  plane tilt=%.1f deg  h0=%.2fm",
+                "trav=%d  up=%d  down=%d  steep=%d   unknown=%d/4848   in_fov=%d/%d cov=%.0f%%   |  plane tilt=%.1f deg  h0=%.2fm",
                 hm.count_traversable, hm.count_up, hm.count_down, hm.count_steep, hm.count_unknown,
+                hm.count_in_fov, hm.cols * hm.rows, hm.fov_coverage() * 100.0,
                 std::acos(std::min(1.0, std::max(-1.0, static_cast<double>(seg_.plane.nz)))) *
                     180.0 / 3.14159265358979323846,
                 static_cast<double>(seg_.plane.height_at_origin()));
