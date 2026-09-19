@@ -509,6 +509,23 @@ private:
             fusion_->clear_local_terrain();   // 无帧 → 不注入地形 (行为回到接入路1之前)
             return;  // 首帧未就绪 / 真机帧失效 (H1 同口径)
         }
+        // v2.9.3 深度质量守门 (方案 §4.3): 坏数据比没数据更危险 —— 实机事故中深度全 0 帧
+        // 造出 down=22~27 的假坑, 顶层据此 13/13 全 STOP。质量不达标 ⇒ 本轮**不注入地形**
+        // (2.5D 判未就绪 / 路1 abstain), 决策回落距离阶梯与超声; 悬崖/失明/超声层不受影响。
+        {
+            const size_t dn = frame.depth_map.size();
+            size_t dv = 0;
+            for (size_t i = 0; i < dn; ++i) {
+                if (frame.depth_map[i] != 0) ++dv;
+            }
+            const double vr = (dn > 0) ? static_cast<double>(dv) / static_cast<double>(dn) : 0.0;
+            DepthQualityIssue qissue = DepthQualityIssue::Ok;
+            if (!depth_quality_ok(vr, static_cast<int>(dv), qissue)) {
+                fusion_->clear_local_terrain();   // 未就绪 ⇒ 路1 不表态 (行为回到接入路1之前)
+                return;
+            }
+        }
+
         PointCloud cloud_opt, cloud_link;
         depth_to_cloud(frame.depth_map.data(), frame.depth_width,
                        frame.depth_height, cloud_K_, cloud_opt);
