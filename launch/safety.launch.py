@@ -44,7 +44,7 @@ def generate_launch_description():
             'camera_z', default_value='0.18',
             description='相机相对 base_link: 高 (m)'),
         DeclareLaunchArgument(
-            'camera_pitch_rad', default_value='0.2617994',
+            'camera_pitch_rad',   # ⚠ 跟随**实际装配**: 当前装配=镜头水平⇒0.0; 装成规格15°下压后改 0.2618 default_value='0.0',
             description='相机俯仰 (rad, +15° 前俯, 与算法库 CameraExtrinsics 默认一致)'),
         DeclareLaunchArgument(
             'enable_rgb', default_value='false',

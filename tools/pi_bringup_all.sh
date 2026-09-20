@@ -17,8 +17,8 @@ if [ "$(pgrep -c -f '[s]afety_node' || echo 0)" = "0" ]; then
   echo "-> 节点未跑, 启动"
   setsid ros2 run mechdog_navigation_ros safety_node --ros-args \
     -p use_simulated:=false -p depth_source:=topic -p enable_pointcloud:=true \
-    -p camera_height_m:=0.90 -p cloud_z:=0.0 -p ground_prior_window:=0.60 \
-    -p cloud_pitch_rad:=0.2618 -p cloud_roll_rad:=0.0 -p ground_fit_method:=cell \
+    -p camera_height_m:=0.750 -p cloud_z:=0.0 -p cloud_z:=0.00 \
+    -p cloud_pitch_rad:=0.0 -p cloud_roll_rad:=0.0 -p ground_fit_method:=cell \
     > /home/chj/report_node.log 2>&1 < /dev/null &
   sleep 15
 fi

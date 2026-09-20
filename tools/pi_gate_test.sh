@@ -9,9 +9,9 @@ echo "=== 0) 停相机(避免与回放抢话题) + 重启节点(清日志) ==="
 pkill -9 -f "[a]stra_camera_node"; pkill -9 -f "[s]afety_node"; sleep 3
 : > /home/chj/report_node.log
 setsid ros2 run mechdog_navigation_ros safety_node --ros-args \
-  -p use_simulated:=false -p depth_source:=topic -p camera_height_m:=0.9 \
-  -p ground_prior_window:=0.6 -p ground_fit_method:=cell \
-  -p cloud_pitch_rad:=0.2618 -p cloud_roll_rad:=0.0 -p enable_pointcloud:=true \
+  -p use_simulated:=false -p depth_source:=topic -p camera_height_m:=0.75 \
+  -p cloud_z:=0.0 -p ground_fit_method:=cell \
+  -p cloud_pitch_rad:=0.0 -p cloud_roll_rad:=0.0 -p enable_pointcloud:=true \
   > /home/chj/report_node.log 2>&1 < /dev/null &
 sleep 12
 echo "=== A) 基线: 无帧时节点行为 ==="

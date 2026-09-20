@@ -128,6 +128,16 @@ public:
         const double cloud_roll_rad = this->declare_parameter("cloud_roll_rad", 0.0);
         camera_height_m_ = this->declare_parameter("camera_height_m", -1.0);
         prior_window_m_  = this->declare_parameter("ground_prior_window", -1.0);
+        // v2.9.4 配置护栏: 地面先验半带宽是**安全参数** (与镜头离地高强相关)。放宽它
+        //   等于允许"错误高度的平面"被当作地面 —— 实测事故: 台架传 0.6 时, 椅面(h0=-0.34)
+        //   被判为地面 ⇒ 真正的地板反被当成坑(down=20)、近场走廊失效(near=0)。
+        //   装机路径必须保持仓库默认 0.10; 台架请改用 camera_height_m:=<实测镜头高> 推导。
+        if (prior_window_m_ > 0.25) {
+            RCLCPP_WARN(this->get_logger(),
+                "ground_prior_window=%.2fm 明显放宽 (>0.25m) —— 允许错误高度的平面被当作地面; "
+                "台架请改用 camera_height_m:=<实测镜头高> 推导先验, 装机应保持默认 0.10m",
+                prior_window_m_);
+        }
         // v2.7: 地面提取方法 cell(确定性格最小拟合)|ransac; 默认 ransac = 与历史行为一致
         this->declare_parameter("ground_fit_method", std::string("ransac"));
         // 切换点: 必须在构造函数里赋值 (成员声明区不能写语句 —— 踩过, 构建报 code 2)
@@ -629,6 +639,19 @@ private:
         // 诊断 (真机排查): 平面 / 2.5D / 负障碍 状态。
         // 没有这条日志时, "路1 一声不吭"只能靠猜 —— fail-closed 静默是安全设计,
         // 但排查时必须能看到"为什么静默"(无平面? 走廊空? 还是根本没跑到这里)。
+        // v2.9.4 安装角自检: 拟合平面的 tilt 就是"安装角参数 vs 实际装配"的误差度量 ——
+        //   实测证据 (2026-09-20): 参数按 15°(0.2618) 而镜头实际水平 ⇒ tilt 稳定 13.88°;
+        //   参数改按 0.0 ⇒ tilt 0.5~2.7°。持续大 tilt 就是"参数与装配不符", 大声告警。
+        //   (这类不一致曾让我们追查数日: 见 E:\33\mechdog_navigation_fixed\PROGRESS_2026-09-19.md §⑧)
+        if (seg_.plane.valid) {
+            const double tilt_deg = std::acos(std::clamp(seg_.plane.nz, -1.0, 1.0)) * 57.29577951308232;
+            if (tilt_deg > 5.0) {
+                RCLCPP_WARN_THROTTLE(this->get_logger(), *this->get_clock(), 5000,
+                    "安装角自检: 拟合平面持续倾斜 %.1f° (>5°) —— cloud_pitch_rad=%.4f rad (%.1f°) 很可能与"
+                    "**实际装配**不符; 请核对相机安装角 (装配水平⇒0.0; 装配规格 15°下压⇒0.2618)",
+                    tilt_deg, cloud_E_.pitch, cloud_E_.pitch * 57.29577951308232);
+            }
+        }
         RCLCPP_INFO_THROTTLE(this->get_logger(), *this->get_clock(), 3000,
             "感知: 点云=%zu 平面valid=%d tilt=%.2f° h0=%.3fm 内点=%zu neg=%zu | 2.5D %s",
             cloud_base_.points.size(), static_cast<int>(seg_.plane.valid),

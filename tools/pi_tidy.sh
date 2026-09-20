@@ -8,8 +8,8 @@ echo "清理前: safety_node=$(pgrep -c -f '[s]afety_node' || echo 0)"
 pkill -9 -f safety_node; sleep 3
 setsid ros2 run mechdog_navigation_ros safety_node --ros-args \
   -p use_simulated:=false -p depth_source:=topic -p enable_pointcloud:=true \
-  -p camera_height_m:=0.90 -p cloud_z:=0.0 -p ground_prior_window:=0.60 \
-  -p cloud_pitch_rad:=0.2618 -p cloud_roll_rad:=0.0 -p ground_fit_method:=cell \
+  -p camera_height_m:=0.750 -p cloud_z:=0.0 -p cloud_z:=0.00 \
+  -p cloud_pitch_rad:=0.0 -p cloud_roll_rad:=0.0 -p ground_fit_method:=cell \
   > /home/chj/report_node.log 2>&1 < /dev/null &
 sleep 12
 echo "清理后: safety_node=$(pgrep -c -f '[s]afety_node' || echo 0)  report_view=$(pgrep -c -f report_view.py || echo 0)  camera=$(pgrep -c -f '[a]stra_camera_node' || echo 0)"
