@@ -521,6 +521,9 @@ private:
             const double vr = (dn > 0) ? static_cast<double>(dv) / static_cast<double>(dn) : 0.0;
             DepthQualityIssue qissue = DepthQualityIssue::Ok;
             if (!depth_quality_ok(vr, static_cast<int>(dv), qissue)) {
+                RCLCPP_WARN_THROTTLE(this->get_logger(), *this->get_clock(), 2000,
+                    "深度质量未就绪 (issue=%d, valid=%.1f%% / %zu px) ⇒ 本轮不注入地形 (路1 abstain)",
+                    static_cast<int>(qissue), vr * 100.0, dv);
                 fusion_->clear_local_terrain();   // 未就绪 ⇒ 路1 不表态 (行为回到接入路1之前)
                 return;
             }
