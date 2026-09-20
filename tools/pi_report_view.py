@@ -103,8 +103,24 @@ def compose():
         x = (i % 2) * W_PANEL + 10
         y = (i // 2) * H_PANEL + H_PANEL - 12
         cv2.putText(canvas, name, (x, y), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 255), 1)
-    bar = np.full((46, canvas.shape[1], 3), 45, np.uint8)
-    cv2.putText(bar, s[:120], (12, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.62, (0, 255, 0), 2)
+    # ---- 状态栏 (v2.9.4): 按像素宽度自动换行 —— 修右端被截断 (in_fov/cov 曾整段看不见)
+    band_h = 72
+    bar = np.full((band_h, canvas.shape[1], 3), 45, np.uint8)
+    max_w = canvas.shape[1] - 24
+    def _txt_w(t):
+        (tw, _th), _ = cv2.getTextSize(t, cv2.FONT_HERSHEY_SIMPLEX, 0.62, 2)
+        return tw
+    lines, cur = [], ""
+    for w_ in s.split():
+        cand = (cur + " " + w_).strip()
+        if _txt_w(cand) <= max_w or not cur:
+            cur = cand
+        else:
+            lines.append(cur); cur = w_
+    if cur:
+        lines.append(cur)
+    for i, ln in enumerate(lines[:2]):
+        cv2.putText(bar, ln, (12, 28 + i * 28), cv2.FONT_HERSHEY_SIMPLEX, 0.62, (0, 255, 0), 2)
     return np.vstack([canvas, bar])
 
 REC = float(__import__("os").environ.get("RECORD_SECONDS", "0") or 0)
