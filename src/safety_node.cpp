@@ -653,9 +653,15 @@ private:
             }
         }
         RCLCPP_INFO_THROTTLE(this->get_logger(), *this->get_clock(), 3000,
-            "感知: 点云=%zu 平面valid=%d tilt=%.2f° h0=%.3fm 内点=%zu neg=%zu | 2.5D %s",
+            "感知: 点云=%zu 平面valid=%d tilt=%.2f° [n=(%.3f,%.3f,%.3f) 分量 %.2f°/%.2f°] h0=%.3fm 内点=%zu neg=%zu | 2.5D %s",
             cloud_base_.points.size(), static_cast<int>(seg_.plane.valid),
             std::acos(std::min(1.0, std::max(-1.0, static_cast<double>(seg_.plane.nz)))) *
+                180.0 / 3.14159265358979323846,
+            static_cast<double>(seg_.plane.nx), static_cast<double>(seg_.plane.ny),
+            static_cast<double>(seg_.plane.nz),
+            std::asin(std::min(1.0, std::max(-1.0, static_cast<double>(seg_.plane.nx)))) *
+                180.0 / 3.14159265358979323846,
+            std::asin(std::min(1.0, std::max(-1.0, static_cast<double>(seg_.plane.ny)))) *
                 180.0 / 3.14159265358979323846,
             static_cast<double>(seg_.plane.height_at_origin()),
             static_cast<size_t>(seg_.plane.inliers), seg_.negative_points.size(),
