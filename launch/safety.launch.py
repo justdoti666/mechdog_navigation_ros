@@ -44,7 +44,10 @@ def generate_launch_description():
             'camera_z', default_value='0.18',
             description='相机相对 base_link: 高 (m)'),
         DeclareLaunchArgument(
-            'camera_pitch_rad',   # ⚠ 跟随**实际装配**: 当前装配=镜头水平⇒0.0; 装成规格15°下压后改 0.2618 default_value='0.0',
+            # ⚠ 跟随**实际装配**: 台架实测≈10°前倾 ⇒ 0.17 (见 PLAN_2026-09-21 §P1);
+            #   机械按规格装成 15° 下压后改 0.2618。改动前务必用"安装角自检"确认 tilt<2°。
+            'camera_pitch_rad',
+            default_value='0.0',
             description='相机俯仰 (rad, +15° 前俯, 与算法库 CameraExtrinsics 默认一致)'),
         DeclareLaunchArgument(
             'enable_rgb', default_value='false',
@@ -85,6 +88,8 @@ def generate_launch_description():
             description='地面高度先验半带宽(m); <=0 = 用仓库默认(0.10)'),
         DeclareLaunchArgument(
             'camera_roll_rad', default_value='0.0',
+        DeclareLaunchArgument(
+            'camera_yaw_rad', default_value='0.0',   # v2.9.6 安装偏航 (单水平面观测不出, 装夹对齐机体后置 0)
             description='v2.8 相机安装横滚(弧度); 竖墙标定给出 (台架实测 -0.041)'),
         DeclareLaunchArgument(
             'ground_fit_method', default_value='ransac',
@@ -109,6 +114,7 @@ def generate_launch_description():
                 'cloud_x': LaunchConfiguration('camera_x'),
                 'cloud_z': LaunchConfiguration('camera_z'),
                 'cloud_pitch_rad': LaunchConfiguration('camera_pitch_rad'),
+                'cloud_yaw_rad': LaunchConfiguration('camera_yaw_rad'),
                 'cloud_roll_rad': LaunchConfiguration('camera_roll_rad'),
                 'camera_height_m': LaunchConfiguration('camera_height_m'),
                 'ground_prior_z': LaunchConfiguration('ground_prior_z'),

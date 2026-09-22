@@ -126,6 +126,10 @@ public:
         // v2.8: 安装横滚 —— "镜头平行地面"是硬规格(pitch=0), 横滚由**竖墙标定**给出
         //   (wall_calib: 竖直面法向的仰角 = roll 偏差; 台架实测 +2.35° ⇒ -0.041 rad)
         const double cloud_roll_rad = this->declare_parameter("cloud_roll_rad", 0.0);
+        // v2.9.6: 安装偏航 —— 三参数标定用。注意: 单个水平面**观测不出 yaw**
+        //   (绕竖轴旋转不改变平面倾角), 故 yaw 只能由竖直面/已知朝向给出;
+        //   本参数先暴露出来(默认 0), 等机械装夹对齐机体后置 0 即可。
+        const double cloud_yaw_rad  = this->declare_parameter("cloud_yaw_rad", 0.0);
         camera_height_m_ = this->declare_parameter("camera_height_m", -1.0);
         prior_window_m_  = this->declare_parameter("ground_prior_window", -1.0);
         // v2.9.4 配置护栏: 地面先验半带宽是**安全参数** (与镜头离地高强相关)。放宽它
@@ -150,7 +154,7 @@ public:
         cloud_E_.z     = cloud_z_;
         cloud_E_.roll  = cloud_roll_rad;   // v2.8 竖墙标定值
         cloud_E_.pitch = cloud_pitch_rad_;
-        cloud_E_.yaw   = 0.0;
+        cloud_E_.yaw   = cloud_yaw_rad;   // v2.9.6 三参数标定 (默认 0)
         if (prior_override > -900.0) {
             gseg_params_.ground_prior_z = prior_override;
         } else if (camera_height_m_ > 0.0) {
