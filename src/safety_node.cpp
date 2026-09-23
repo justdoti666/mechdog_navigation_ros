@@ -543,23 +543,20 @@ private:
             }
         }
 
-        PointCloud cloud_opt, cloud_link;
-        depth_to_cloud(frame.depth_map.data(), frame.depth_width,
-                       frame.depth_height, cloud_K_, cloud_opt);
-        transform_optical_to_link(cloud_opt, cloud_link);
-
-        // 下采样 (发布与分割同源): 全量 30 万点在 Pi 上 10Hz 扛不住
-        const size_t total = cloud_link.points.size();
-        const size_t step = static_cast<size_t>(cloud_step_);
+        // v2.9.9 提速 (真机实测根因): 原先先做"全量反投影(640×480=30.7 万像素)"、再对**全量点云**
+        //   做 optical→link 变换 —— 两次全分辨率遍历 ⇒ ~42ms/帧 ⇒ 节点 CPU 81%(19Hz 深度流)。
+        //   改为**直接按步长反投影**: 只算 1/step 的像素, 之后所有变换只在这个小子集上做 ⇒ 预计 ~5ms/帧。
+        //   等价性: 新点集的每个点, 与老实现同像素算出的点**逐位相同**(子集关系);
+        //   test_strided_backprojection_subset 覆盖, 并用变异测试确认它真的会失败(failed=1)。
+        const size_t step = static_cast<size_t>((cloud_step_ > 1) ? cloud_step_ : 1);
+        PointCloud cloud_ds_opt;
+        depth_to_cloud_strided(frame.depth_map.data(), frame.depth_width,
+                               frame.depth_height, cloud_K_,
+                               static_cast<int>(step), cloud_ds_opt);
+        // 发布用的 camera_link 系点云: 由同一份小点云转一次得到 (不再做全量变换)
         cloud_ds_link_ = PointCloud{};
-        cloud_ds_link_.seq = cloud_link.seq;
-        cloud_ds_link_.stamp = cloud_link.stamp;
-        cloud_ds_link_.frame_id = cloud_link.frame_id;
-        cloud_ds_link_.points.reserve(total / step + 1);
-        for (size_t i = 0; i < total; i += step) {
-            cloud_ds_link_.points.push_back(cloud_link.points[i]);
-        }
-        if (cloud_ds_link_.points.empty()) {
+        transform_optical_to_link(cloud_ds_opt, cloud_ds_link_);
+        if (cloud_ds_opt.points.empty()) {
             fusion_->clear_local_terrain();
             return;  // 全无效深度
         }
@@ -568,14 +565,7 @@ private:
         //   所以**不能**把 link 系点云再喂给它 —— 那会转两次, base 系前后/上下颠倒。
         //   实测症状: 地板 z 最低只有 -0.56m(相机离地0.9m)、known 恒 55/4848、倾角乱跳、trav 恒 0。
         //   这里另做一份"光学系下采样"专供感知; 发布用的 cloud_ds_link_ 保持原样(逐点等价)。
-        PointCloud cloud_ds_opt;
-        cloud_ds_opt.seq = cloud_link.seq;
-        cloud_ds_opt.stamp = cloud_link.stamp;
-        cloud_ds_opt.frame_id = cloud_link.frame_id;
-        cloud_ds_opt.points.reserve(total / step + 1);
-        for (size_t i = 0; i < total; i += step) {
-            cloud_ds_opt.points.push_back(cloud_opt.points[i]);
-        }
+        // (v2.9.9: cloud_ds_opt 已在上方按步长直接构建, 此处只做一次变换)
         transform_to_base(cloud_ds_opt, cloud_E_, cloud_base_);
         segment_ground(cloud_base_, gseg_params_, seg_);
 
