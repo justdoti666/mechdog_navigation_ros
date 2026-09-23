@@ -664,7 +664,7 @@ private:
                     static_cast<double>(seg_.plane.height_at_origin()));
             } else {
                 std::snprintf(buf, sizeof(buf),
-                    "NO PLANE (fail-closed, 本轮不注入地形) — 视野内未拟合出地面 | in_fov=%d/%d cov=%.0f%% | plane tilt=--  h0=--",
+                    "NO PLANE (fail-closed) - no ground plane in view; terrain NOT injected this round | in_fov=%d/%d cov=%.0f%% | plane tilt=--  h0=--  (pitch camera down onto open floor)",
                     hm.count_in_fov, cols * rows, hm.fov_coverage() * 100.0);
             }
             s.data = buf;
