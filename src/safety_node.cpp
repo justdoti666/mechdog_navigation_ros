@@ -527,11 +527,13 @@ private:
         // 造出 down=22~27 的假坑, 顶层据此 13/13 全 STOP。质量不达标 ⇒ 本轮**不注入地形**
         // (2.5D 判未就绪 / 路1 abstain), 决策回落距离阶梯与超声; 悬崖/失明/超声层不受影响。
         {
+            // v2.9.10 提速: 有效像素数已由 AstraProDriver::inject_depth_frame 在**合并后的单遍扫描**
+            //   里精确算出(非抽样) ⇒ 此处不再重扫 30.7 万像素。等价性依据:
+            //   ① 帧是"局部构建完整 → 加锁一次性 std::move 替换", 消费者读到的必为已清洗帧;
+            //   ② 清洗后 `!= 0` 与"在 [MIN,MAX] 量程内"完全等价;
+            //   ③ 离线 A/B 工装 test_astra_equiv.cpp 在 6 种图案上逐字段对照 = 逐位一致。
             const size_t dn = frame.depth_map.size();
-            size_t dv = 0;
-            for (size_t i = 0; i < dn; ++i) {
-                if (frame.depth_map[i] != 0) ++dv;
-            }
+            const size_t dv = frame.valid_pixel_count;
             const double vr = (dn > 0) ? static_cast<double>(dv) / static_cast<double>(dn) : 0.0;
             DepthQualityIssue qissue = DepthQualityIssue::Ok;
             if (!depth_quality_ok(vr, static_cast<int>(dv), qissue)) {
