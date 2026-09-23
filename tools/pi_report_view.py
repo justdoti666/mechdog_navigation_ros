@@ -34,7 +34,7 @@ class Viewer(Node):
         try:
             # v2.9.9: 渲染侧只需 ~10fps; 30Hz 全量处理曾把窗口 CPU 顶到 112%(超过一个核)
             now = time.time()
-            if now - getattr(self, "_t_c", 0.0) < 0.10:
+            if now - getattr(self, "_t_c", 0.0) < 0.033:
                 return
             self._t_c = now
             if m.encoding in ("rgb8", "bgr8"):
@@ -63,7 +63,7 @@ class Viewer(Node):
     def on_depth(self, m):
         try:
             now = time.time()
-            if now - getattr(self, "_t_d", 0.0) < 0.10:
+            if now - getattr(self, "_t_d", 0.0) < 0.033:
                 return
             self._t_d = now
             if m.encoding == "16UC1":
@@ -147,7 +147,7 @@ def record_frame(img):
         os.makedirs("/home/chj", exist_ok=True)
         REC_STATE["path"] = "/home/chj/report_%s.mp4" % _t.strftime("%Y%m%d_%H%M%S")
         REC_STATE["writer"] = cv2.VideoWriter(REC_STATE["path"], cv2.VideoWriter_fourcc(*"mp4v"),
-                                              12.0, (img.shape[1], img.shape[0]))
+                                              25.0, (img.shape[1], img.shape[0]))
         REC_STATE["t0"] = _t.time()
         print("REC_START " + REC_STATE["path"], flush=True)
     cv2.circle(img, (26, 26), 9, (0, 0, 255), -1)
@@ -161,6 +161,7 @@ def record_frame(img):
 
 def frames():
     while True:
+        _t0 = time.time()
         _img = compose()
         try:
             record_frame(_img)
@@ -170,7 +171,7 @@ def frames():
         if ok:
             yield (b"--frame\r\nContent-Type: image/jpeg\r\nContent-Length: " +
                    str(len(buf)).encode() + b"\r\n\r\n" + buf.tobytes() + b"\r\n")
-        time.sleep(1.0 / 12.0)
+        time.sleep(max(0.0, 1.0 / 25.0 - (time.time() - _t0)))
 
 class Handler(BaseHTTPRequestHandler):
     def do_GET(self):
