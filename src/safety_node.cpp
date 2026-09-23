@@ -331,6 +331,7 @@ public:
                 }
                 // 近场感知: **每轮都更新** (与是否发布点云解耦) —— 路1 的避坑决策要靠它;
                 // 原来只在 cloud_pub_ 存在时才跑分割, 会让"避坑"静默依赖可视化开关。
+                const auto tU0 = std::chrono::steady_clock::now();
                 update_perception();
                 // 近场点云: 跟随融合节拍发布 (融合线程独占相机读取; rclcpp publish 线程安全)
                 if (cloud_pub_) {
@@ -339,6 +340,15 @@ public:
                 // RGB 回传: 节流到目标帧率后发布 Astra 彩色帧 (同一驱动实例, 免抢相机)
                 if (rgb_pub_) {
                     publish_rgb_if_due();
+                }
+                const auto tU1 = std::chrono::steady_clock::now();
+                {   // v2.9.11 分段计时(限流 2s; 仅观测, 不参与任何决策)
+                    const double total = std::chrono::duration<double, std::milli>(tU1 - tU0).count();
+                    const double inner = ms_gate_ + ms_backproj_ + ms_to_base_ + ms_seg_ + ms_heightmap_;
+                    RCLCPP_INFO_THROTTLE(this->get_logger(), *this->get_clock(), 2000,
+                        "[计时段] 主线程: 解码=%.1f 驱动注入=%.1f | 感知: 门槛=%.1f 反投影=%.1f 到base=%.1f 分割=%.1f 高度图=%.1f | 感知小计=%.1f 其余(可视化/发布)=%.1f 总=%.1f ms",
+                        ms_decode_, ms_inject_, ms_gate_, ms_backproj_, ms_to_base_, ms_seg_,
+                        ms_heightmap_, inner, total - inner, total);
                 }
                 // ROS-2: 速率门控 (fuse 自身已含 read_all sleep, 但防御性兜底)
                 auto elapsed = std::chrono::steady_clock::now() - t0;
@@ -462,7 +472,9 @@ private:
     // ---- v2.4 深度话题源 (depth_source=topic) ----
     // 深度图 → uint16(mm) → 注入驱动 (区域分析/环境判定走驱动内部同一链路)。
     // 支持 16UC1/mono16 (mm) 与 32FC1 (m); 其他编码节流告警后丢弃。
+    // v2.9.11 计时(仅观测): 主线程 解码拷贝 / 驱动注入 两段
     void on_depth_image(sensor_msgs::msg::Image::SharedPtr msg) {
+        const auto t_img0 = std::chrono::steady_clock::now();
         const int w = static_cast<int>(msg->width);
         const int h = static_cast<int>(msg->height);
         if (w <= 0 || h <= 0) return;
@@ -487,10 +499,15 @@ private:
         }
         const double stamp_s = static_cast<double>(msg->header.stamp.sec)
                              + static_cast<double>(msg->header.stamp.nanosec) * 1e-9;
+        const auto t_inj0 = std::chrono::steady_clock::now();
         if (astra_->inject_depth_frame(buf, w, h, stamp_s)) {
             last_depth_rx_ = std::chrono::steady_clock::now();
             have_depth_rx_ = true;
         }
+        const auto t_inj1 = std::chrono::steady_clock::now();
+        // 主线程耗时(供感知线程一并打印; 仅日志用, 允许无锁读取)
+        ms_decode_ = std::chrono::duration<double, std::milli>(t_inj0 - t_img0).count();
+        ms_inject_ = std::chrono::duration<double, std::milli>(t_inj1 - t_inj0).count();
     }
 
     // 深度内参话题 → 替换 FOV 反推内参 (点云 / 2.5D / 路1 全部受益)
@@ -516,6 +533,7 @@ private:
     // (同一份云 + 同一份分割, 不重复跑 RANSAC, 也不出现"发布一套、决策另一套")。
     // 由融合线程调用 (独占相机读取, 无跨线程共享, 无需加锁)。
     void update_perception() {
+        const auto tS0 = std::chrono::steady_clock::now();
         have_perception_ = false;
         AstraFrame frame = astra_->get_latest_frame();
         if (!frame.valid || frame.depth_map.empty() ||
@@ -551,6 +569,8 @@ private:
         //   等价性: 新点集的每个点, 与老实现同像素算出的点**逐位相同**(子集关系);
         //   test_strided_backprojection_subset 覆盖, 并用变异测试确认它真的会失败(failed=1)。
         const size_t step = static_cast<size_t>((cloud_step_ > 1) ? cloud_step_ : 1);
+        const auto tS1 = std::chrono::steady_clock::now();
+        ms_gate_ = std::chrono::duration<double, std::milli>(tS1 - tS0).count();
         PointCloud cloud_ds_opt;
         depth_to_cloud_strided(frame.depth_map.data(), frame.depth_width,
                                frame.depth_height, cloud_K_,
@@ -568,7 +588,11 @@ private:
         //   实测症状: 地板 z 最低只有 -0.56m(相机离地0.9m)、known 恒 55/4848、倾角乱跳、trav 恒 0。
         //   这里另做一份"光学系下采样"专供感知; 发布用的 cloud_ds_link_ 保持原样(逐点等价)。
         // (v2.9.9: cloud_ds_opt 已在上方按步长直接构建, 此处只做一次变换)
+        const auto tS2 = std::chrono::steady_clock::now();
+        ms_backproj_ = std::chrono::duration<double, std::milli>(tS2 - tS1).count();
         transform_to_base(cloud_ds_opt, cloud_E_, cloud_base_);
+        const auto tS3 = std::chrono::steady_clock::now();
+        ms_to_base_ = std::chrono::duration<double, std::milli>(tS3 - tS2).count();
         segment_ground(cloud_base_, gseg_params_, seg_);
 
         // ---- 路1: 近场地形 → 融合决策 (P1 负障碍点 + P1.5 禁行格) ----
@@ -579,7 +603,11 @@ private:
         //   (几何修复前曾测得 0/2228, 那是 base 系双转 bug 的症状, 非楔形问题)
         hcfg.wedge_only = grid_wedge_only_;
         HeightMap25Result hm;
+        const auto tS4 = std::chrono::steady_clock::now();
+        ms_seg_ = std::chrono::duration<double, std::milli>(tS4 - tS3).count();
         build_heightmap_25(cloud_base_, seg_, hcfg, hm);
+        const auto tS5 = std::chrono::steady_clock::now();
+        ms_heightmap_ = std::chrono::duration<double, std::milli>(tS5 - tS4).count();
         fusion_->set_local_terrain(hm, seg_);
 
         // ---- v2.8.2 汇报用可视化: 发布 2.5D 可行度图 + 状态文本 ----
@@ -926,6 +954,11 @@ private:
     bool have_depth_rx_ = false;       // 收到过话题帧 (供超时看门狗判断)
     bool have_camera_info_ = false;
     std::chrono::steady_clock::time_point last_depth_rx_{};
+    // v2.9.11 分段计时(仅观测用; 跨线程读取, 允许无锁 — 只用于日志)
+    double ms_decode_ = 0.0, ms_inject_ = 0.0;      // 主线程
+    double ms_gate_ = 0.0, ms_backproj_ = 0.0, ms_to_base_ = 0.0,
+           ms_seg_ = 0.0, ms_heightmap_ = 0.0;      // 感知线程
+
     rclcpp::Subscription<sensor_msgs::msg::Image>::SharedPtr depth_sub_;
     rclcpp::Subscription<sensor_msgs::msg::CameraInfo>::SharedPtr depth_info_sub_;
 
