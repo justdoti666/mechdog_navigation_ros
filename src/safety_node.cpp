@@ -597,13 +597,23 @@ private:
         //   追查近一小时)。现在无论平面是否有效都发一张图, 话题节奏恒定;
         //   无平面时发“全未知”图, 并在状态文本里写明原因。
         const bool plane_ok = hm.valid && seg_.plane.valid;
-        if (hm.cols > 0 && hm.rows > 0) {
+        const bool grid_ok = (hm.cols > 0 && hm.rows > 0);
+        // v2.9.8: 无平面时 build_heightmap_25 直接 return ⇒ 网格为空(fail-closed 是决策侧的正确行为),
+        //   但发布侧不能因此沉默: 否则汇报窗口那一格没有新帧可画, 看起来像卡死。
+        //   实测: 对着墙面/晃动时 /safety/terrain_map 90 秒零消息, 而深度仍 30Hz;
+        //   节点进程 State=S/wchan=futex_wait(未卡死) ⇒ 就是没走到发布。
+        //   现在按配置尺寸自造"全未知"图, 话题节奏恒定。
+        const int cols = grid_ok ? hm.cols
+            : static_cast<int>((hcfg.max_x_m - hcfg.min_x_m) / hcfg.cell_size) + 1;
+        const int rows = grid_ok ? hm.rows
+            : static_cast<int>(2.0 * hcfg.y_half_m / hcfg.cell_size) + 1;
+        if (cols > 0 && rows > 0) {
             static rclcpp::Publisher<sensor_msgs::msg::Image>::SharedPtr tpub;
             static rclcpp::Publisher<std_msgs::msg::String>::SharedPtr spub;
             if (!tpub) tpub = this->create_publisher<sensor_msgs::msg::Image>("/safety/terrain_map", 1);
             if (!spub) spub = this->create_publisher<std_msgs::msg::String>("/safety/status_text", 1);
             const int sc = 4;                       // 放大倍数
-            const int W = hm.rows * sc, H = hm.cols * sc;   // 横轴=x(前进), 纵轴=y
+            const int W = rows * sc, H = cols * sc;   // 横轴=x(前进), 纵轴=y
             sensor_msgs::msg::Image img;
             img.header.stamp = this->now();
             img.header.frame_id = "base_link";
@@ -619,17 +629,24 @@ private:
                     default:                    return {45, 45, 45};      // 深灰=未知
                 }
             };
-            for (int r = 0; r < hm.rows; ++r) {
-                for (int c = 0; c < hm.cols; ++c) {
-                    const CellFlag cf = plane_ok
-                        ? hm.flag[static_cast<size_t>(r) * hm.cols + c]
-                        : CellFlag::Unknown;   // 无平面 ⇒ 一律画未知 (不假装可通行)
-                    const auto col = color_of(cf);
-                    for (int dy = 0; dy < sc; ++dy) {
-                        for (int dx = 0; dx < sc; ++dx) {
-                            const int x = r * sc + dx, y = c * sc + dy;
-                            const size_t o = (static_cast<size_t>(y) * W + x) * 3;
-                            img.data[o] = col[0]; img.data[o + 1] = col[1]; img.data[o + 2] = col[2];
+            if (!grid_ok) {
+                // 无平面/无网格: 直接刷"深灰=未知"; 此时 hm.flag 为空, 读它会越界
+                for (size_t o = 0; o + 2 < img.data.size(); o += 3) {
+                    img.data[o] = 45; img.data[o + 1] = 45; img.data[o + 2] = 45;
+                }
+            } else {
+                for (int r = 0; r < hm.rows; ++r) {
+                    for (int c = 0; c < hm.cols; ++c) {
+                        const CellFlag cf = plane_ok
+                            ? hm.flag[static_cast<size_t>(r) * hm.cols + c]
+                            : CellFlag::Unknown;   // 无平面 ⇒ 一律画未知 (不假装可通行)
+                        const auto col = color_of(cf);
+                        for (int dy = 0; dy < sc; ++dy) {
+                            for (int dx = 0; dx < sc; ++dx) {
+                                const int x = r * sc + dx, y = c * sc + dy;
+                                const size_t o = (static_cast<size_t>(y) * W + x) * 3;
+                                img.data[o] = col[0]; img.data[o + 1] = col[1]; img.data[o + 2] = col[2];
+                            }
                         }
                     }
                 }
@@ -648,7 +665,7 @@ private:
             } else {
                 std::snprintf(buf, sizeof(buf),
                     "NO PLANE (fail-closed, 本轮不注入地形) — 视野内未拟合出地面 | in_fov=%d/%d cov=%.0f%% | plane tilt=--  h0=--",
-                    hm.count_in_fov, hm.cols * hm.rows, hm.fov_coverage() * 100.0);
+                    hm.count_in_fov, cols * rows, hm.fov_coverage() * 100.0);
             }
             s.data = buf;
             spub->publish(s);
