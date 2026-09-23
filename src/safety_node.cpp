@@ -592,7 +592,12 @@ private:
 
         // ---- v2.8.2 汇报用可视化: 发布 2.5D 可行度图 + 状态文本 ----
         //   (画面上的可行度图 = 节点真实决策依据, 不是事后重算, 汇报口径最硬)
-        if (hm.valid && hm.cols > 0 && hm.rows > 0) {
+        // v2.9.7: **每帧都发布** —— 原实现只在“平面有效”时才发, 无平面(如镜头对着墙)时
+        //   话题停更 ⇒ 汇报窗口那一格没有新帧可画 ⇒ 看起来像“卡死/卡顿”(实测被误判成 CPU 问题,
+        //   追查近一小时)。现在无论平面是否有效都发一张图, 话题节奏恒定;
+        //   无平面时发“全未知”图, 并在状态文本里写明原因。
+        const bool plane_ok = hm.valid && seg_.plane.valid;
+        if (hm.cols > 0 && hm.rows > 0) {
             static rclcpp::Publisher<sensor_msgs::msg::Image>::SharedPtr tpub;
             static rclcpp::Publisher<std_msgs::msg::String>::SharedPtr spub;
             if (!tpub) tpub = this->create_publisher<sensor_msgs::msg::Image>("/safety/terrain_map", 1);
@@ -616,7 +621,10 @@ private:
             };
             for (int r = 0; r < hm.rows; ++r) {
                 for (int c = 0; c < hm.cols; ++c) {
-                    const auto col = color_of(hm.flag[static_cast<size_t>(r) * hm.cols + c]);
+                    const CellFlag cf = plane_ok
+                        ? hm.flag[static_cast<size_t>(r) * hm.cols + c]
+                        : CellFlag::Unknown;   // 无平面 ⇒ 一律画未知 (不假装可通行)
+                    const auto col = color_of(cf);
                     for (int dy = 0; dy < sc; ++dy) {
                         for (int dx = 0; dx < sc; ++dx) {
                             const int x = r * sc + dx, y = c * sc + dy;
@@ -629,13 +637,19 @@ private:
             tpub->publish(img);
             std_msgs::msg::String s;
             char buf[512];
-            std::snprintf(buf, sizeof(buf),
-                "trav=%d  up=%d  down=%d  steep=%d   unknown=%d/4848   in_fov=%d/%d cov=%.0f%%   |  plane tilt=%.1f deg  h0=%.2fm",
-                hm.count_traversable, hm.count_up, hm.count_down, hm.count_steep, hm.count_unknown,
-                hm.count_in_fov, hm.cols * hm.rows, hm.fov_coverage() * 100.0,
-                std::acos(std::min(1.0, std::max(-1.0, static_cast<double>(seg_.plane.nz)))) *
-                    180.0 / 3.14159265358979323846,
-                static_cast<double>(seg_.plane.height_at_origin()));
+            if (plane_ok) {
+                std::snprintf(buf, sizeof(buf),
+                    "trav=%d  up=%d  down=%d  steep=%d   unknown=%d/4848   in_fov=%d/%d cov=%.0f%%   |  plane tilt=%.1f deg  h0=%.2fm",
+                    hm.count_traversable, hm.count_up, hm.count_down, hm.count_steep, hm.count_unknown,
+                    hm.count_in_fov, hm.cols * hm.rows, hm.fov_coverage() * 100.0,
+                    std::acos(std::min(1.0, std::max(-1.0, static_cast<double>(seg_.plane.nz)))) *
+                        180.0 / 3.14159265358979323846,
+                    static_cast<double>(seg_.plane.height_at_origin()));
+            } else {
+                std::snprintf(buf, sizeof(buf),
+                    "NO PLANE (fail-closed, 本轮不注入地形) — 视野内未拟合出地面 | in_fov=%d/%d cov=%.0f%% | plane tilt=--  h0=--",
+                    hm.count_in_fov, hm.cols * hm.rows, hm.fov_coverage() * 100.0);
+            }
             s.data = buf;
             spub->publish(s);
         }
