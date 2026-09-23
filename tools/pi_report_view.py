@@ -2,6 +2,7 @@
 # pi_report_view.py -- live report window: RGB + DEPTH + TRAVERSABILITY(2.5D) + status bar
 # open http://<pi-ip>:8080/  (MJPEG live stream; record this pane)
 # NOTE: all overlay text is ASCII on purpose (cv2.putText cannot draw CJK).
+import time
 import threading, time, numpy as np, cv2
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import rclpy
@@ -31,13 +32,20 @@ class Viewer(Node):
 
     def on_color(self, m):
         try:
+            # v2.9.9: 渲染侧只需 ~10fps; 30Hz 全量处理曾把窗口 CPU 顶到 112%(超过一个核)
+            now = time.time()
+            if now - getattr(self, "_t_c", 0.0) < 0.10:
+                return
+            self._t_c = now
             if m.encoding in ("rgb8", "bgr8"):
                 a = np.frombuffer(m.data, np.uint8).reshape(m.height, m.width, 3)
                 if m.encoding == "rgb8":
                     a = a[:, :, ::-1]
             elif m.encoding == "mono8":
                 g = np.frombuffer(m.data, np.uint8).reshape(m.height, m.width).astype(np.float32)
-                lo, hi = float(np.percentile(g, 2)), float(np.percentile(g, 98))
+                g = g[::2, ::2]                     # 2x 降采样: 面板只要 360x270
+                gs = g[::2, ::2]                    # 百分位再抽一次(16x 便宜)
+                lo, hi = float(np.percentile(gs, 2)), float(np.percentile(gs, 98))
                 if hi > lo + 1.0:
                     g = np.clip((g - lo) / (hi - lo) * 255.0, 0, 255)      # 自动拉伸, 红外偏暗也能看清
                 a = cv2.cvtColor(g.astype(np.uint8), cv2.COLOR_GRAY2BGR)
@@ -54,13 +62,18 @@ class Viewer(Node):
 
     def on_depth(self, m):
         try:
+            now = time.time()
+            if now - getattr(self, "_t_d", 0.0) < 0.10:
+                return
+            self._t_d = now
             if m.encoding == "16UC1":
                 d = np.frombuffer(m.data, np.uint16).reshape(m.height, m.width).astype(np.float32)
             elif m.encoding == "32FC1":
                 d = np.frombuffer(m.data, np.float32).reshape(m.height, m.width) * 1000.0
             else:
                 return
-            med = float(np.nanmedian(d))
+            med = float(np.nanmedian(d[::4, ::4]))    # 抽样算中位数(16x 便宜), 数值等价
+            d = d[::2, ::2]                            # 上色只在 320x240 上做 ⇒ 4x 便宜
             v = d.copy()
             v[(v < 200) | (v > 6000)] = np.nan
             v = np.clip((v - 300.0) / (4000.0 - 300.0), 0, 1)
