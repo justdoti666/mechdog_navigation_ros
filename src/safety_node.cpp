@@ -535,6 +535,7 @@ private:
     void update_perception() {
         const auto tS0 = std::chrono::steady_clock::now();
         have_perception_ = false;
+        depth_gate_hit_ = false;   // v2.9.12: 每轮复位, 只有本轮真被拦下才置位
         AstraFrame frame = astra_->get_latest_frame();
         if (!frame.valid || frame.depth_map.empty() ||
             frame.depth_width <= 0 || frame.depth_height <= 0) {
@@ -558,6 +559,9 @@ private:
                 RCLCPP_WARN_THROTTLE(this->get_logger(), *this->get_clock(), 2000,
                     "深度质量未就绪 (issue=%d, valid=%.1f%% / %zu px) ⇒ 本轮不注入地形 (路1 abstain)",
                     static_cast<int>(qissue), vr * 100.0, dv);
+                depth_gate_hit_ = true;   // v2.9.12: 发布侧据此说"深度坏帧", 不再误导为"没地面"
+                depth_gate_vr_  = vr;
+                depth_gate_px_  = dv;
                 fusion_->clear_local_terrain();   // 未就绪 ⇒ 路1 不表态 (行为回到接入路1之前)
                 return;
             }
@@ -579,6 +583,7 @@ private:
         cloud_ds_link_ = PointCloud{};
         transform_optical_to_link(cloud_ds_opt, cloud_ds_link_);
         if (cloud_ds_opt.points.empty()) {
+            depth_gate_hit_ = true;   // v2.9.12: 全无效深度 ⇒ 数据坏, 非构图问题
             fusion_->clear_local_terrain();
             return;  // 全无效深度
         }
@@ -682,6 +687,11 @@ private:
                     std::acos(std::min(1.0, std::max(-1.0, static_cast<double>(seg_.plane.nz)))) *
                         180.0 / 3.14159265358979323846,
                     static_cast<double>(seg_.plane.height_at_origin()));
+            } else if (depth_gate_hit_) {
+                // v2.9.12: 与"真没地面"区分开 —— 这是坏数据被守门拦下, 不是构图问题
+                std::snprintf(buf, sizeof(buf),
+                    "DEPTH GATE (bad frame: valid=%.1f%% / %zu px) - terrain NOT injected this round | NOT a mounting/aim problem; retry or check camera/USB",
+                    depth_gate_vr_ * 100.0, depth_gate_px_);
             } else {
                 std::snprintf(buf, sizeof(buf),
                     "NO PLANE (fail-closed) - no ground plane in view; terrain NOT injected this round | in_fov=%d/%d cov=%.0f%% | plane tilt=--  h0=--  (pitch camera down onto open floor)",
@@ -933,6 +943,11 @@ private:
     // ---- 相机几何 (v2.6) ----
     double cloud_x_ = 0.12;              // 算法侧外参 (与 launch 静态 TF 同源)
     double cloud_z_ = 0.18;
+    // v2.9.12 可诊断性: 区分"真没地面"与"深度坏帧被守门拦下" —— 此前两者共用同一句
+    // "NO PLANE ... (pitch camera down onto open floor)", 现场会误导 (明明对着地面却被告知朝下压)
+    bool    depth_gate_hit_  = false;
+    double  depth_gate_vr_   = 0.0;   // 本轮的深度有效率
+    size_t  depth_gate_px_   = 0;     // 本轮的有效像素数
     double cloud_pitch_rad_ = 0.2617994; // 15°
     double camera_height_m_ = -1.0;      // 相机镜头离地高 (>0 时推导地面高度先验)
     double prior_window_m_ = -1.0;       // 地面高度先验半带宽 (<=0 = 用仓库默认)
