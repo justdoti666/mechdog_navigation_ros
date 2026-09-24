@@ -637,6 +637,8 @@ private:
             static rclcpp::Publisher<std_msgs::msg::String>::SharedPtr spub;
             if (!tpub) tpub = this->create_publisher<sensor_msgs::msg::Image>("/safety/terrain_map", 1);
             if (!spub) spub = this->create_publisher<std_msgs::msg::String>("/safety/status_text", 1);
+            static rclcpp::Publisher<sensor_msgs::msg::Image>::SharedPtr grpub;
+            if (!grpub) grpub = this->create_publisher<sensor_msgs::msg::Image>("/safety/terrain_grid", 1);
             const int sc = 4;                       // 放大倍数
             const int W = rows * sc, H = cols * sc;   // 横轴=x(前进), 纵轴=y
             sensor_msgs::msg::Image img;
@@ -677,6 +679,30 @@ private:
                 }
             }
             tpub->publish(img);
+            // ---- v2.9.13 紧凑地形话题 (给上位机/弱网用; 纯新增, 不影响任何判定) ----
+            //   背景: /safety/terrain_map 是 x4 放大的 rgb8 渲染图 = 232704 字节/帧
+            //         ⇒ 10Hz 需 18.6 Mbit/s; 实测现场 WiFi 只有 ~1.25 Mbit/s ⇒ 上位机订不动。
+            //   本话题发**原生网格**(每格 1 字节): 4848 字节/帧 ⇒ 10Hz 仅 0.39 Mbit/s (小 46 倍)。
+            //   布局: row-major, index = r*cols + c; cols = x(前)方向(0.6→3.0m, 5cm/格),
+            //         rows = y(左右)方向(-2.5→+2.5m); 与内部 hm.flag 同序同义。
+            //   取值 = mechdog::CellFlag: 0=Unknown 1=Traversable 2=ObstacleUp 3=CliffDown 4=TooSteep
+            //   无平面/无网格时发全 0(=Unknown), 话题节奏恒定 (同 v2.9.8 对 terrain_map 的约定)。
+            sensor_msgs::msg::Image gimg;
+            gimg.header.stamp = img.header.stamp;
+            gimg.header.frame_id = "base_link";
+            gimg.height = rows; gimg.width = cols;
+            gimg.encoding = "mono8"; gimg.is_bigendian = 0;
+            gimg.step = static_cast<sensor_msgs::msg::Image::_step_type>(cols);
+            gimg.data.assign(static_cast<size_t>(cols) * static_cast<size_t>(rows), 0);
+            if (grid_ok && plane_ok) {
+                for (int r = 0; r < hm.rows; ++r) {
+                    for (int c = 0; c < hm.cols; ++c) {
+                        const size_t i = static_cast<size_t>(r) * hm.cols + c;
+                        gimg.data[i] = static_cast<uint8_t>(hm.flag[i]);
+                    }
+                }
+            }
+            grpub->publish(gimg);
             std_msgs::msg::String s;
             char buf[512];
             if (plane_ok) {
