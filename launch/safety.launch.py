@@ -88,12 +88,22 @@ def generate_launch_description():
             description='地面高度先验半带宽(m); <=0 = 用仓库默认(0.10)'),
         DeclareLaunchArgument(
             'camera_roll_rad', default_value='0.0',
+            description='v2.8 相机安装横滚(弧度); 竖墙标定给出 (台架实测 -0.041)'),
         DeclareLaunchArgument(
             'camera_yaw_rad', default_value='0.0',   # v2.9.6 安装偏航 (单水平面观测不出, 装夹对齐机体后置 0)
-            description='v2.8 相机安装横滚(弧度); 竖墙标定给出 (台架实测 -0.041)'),
+            description='v2.9.6 相机安装偏航(弧度); 单水平面观测不出, 装夹对齐机体后置 0'),
         DeclareLaunchArgument(
             'ground_fit_method', default_value='ransac',
             description='v2.7 地面提取方法: ransac(默认, 与历史一致) | cell(确定性格最小拟合)'),
+        DeclareLaunchArgument(
+            'cell_skip_ransac', default_value='true',
+            description='v2.9.16 地面提取: cell 成功时跳过 RANSAC (口径①; false=回历史行为"cell 后仍被 RANSAC 覆盖")'),
+        DeclareLaunchArgument(
+            'depth_bad_streak_n', default_value='3',
+            description='v2.9.17 深度守门时域: 连续 N 轮拿不到可用深度 ⇒ 降级并向 /safety/status_text 显式上报'),
+        DeclareLaunchArgument(
+            'publish_depth_small', default_value='true',
+            description='v2.9.15 发布 /safety/depth_small (16UC1 320x240, 供汇报窗口; 关掉可省带宽)'),
         Node(
             package='mechdog_navigation_ros',
             executable='safety_node',
@@ -120,6 +130,9 @@ def generate_launch_description():
                 'ground_prior_z': LaunchConfiguration('ground_prior_z'),
                 'ground_prior_window': LaunchConfiguration('ground_prior_window'),
                 'ground_fit_method': LaunchConfiguration('ground_fit_method'),
+                'cell_skip_ransac': LaunchConfiguration('cell_skip_ransac'),
+                'depth_bad_streak_n': LaunchConfiguration('depth_bad_streak_n'),
+                'publish_depth_small': LaunchConfiguration('publish_depth_small'),
             }],
         ),
         # 近场点云坐标: base_link -> camera_link 静态变换 (roll/pitch/yaw 弧度;
