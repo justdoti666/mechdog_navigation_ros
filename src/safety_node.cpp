@@ -147,6 +147,10 @@ public:
         // 切换点: 必须在构造函数里赋值 (成员声明区不能写语句 —— 踩过, 构建报 code 2)
         gseg_params_.use_cell_min_fit =
             (this->get_parameter("ground_fit_method").as_string() == "cell");
+        // v2.9.16 (2026-09-25 师兄口径): cell 成功时跳过 RANSAC(省 11~16ms/帧 且保留 cell 精度);
+        //   置 false 回到旧行为(供真机 A/B / 排查)。
+        this->declare_parameter("cell_skip_ransac", true);
+        gseg_params_.cell_skip_ransac = this->get_parameter("cell_skip_ransac").as_bool();
         const double prior_override = this->declare_parameter("ground_prior_z", -999.0);
 
         cloud_E_.x     = cloud_x_;
@@ -781,7 +785,7 @@ private:
             }
         }
         RCLCPP_INFO_THROTTLE(this->get_logger(), *this->get_clock(), 3000,
-            "感知: 点云=%zu 平面valid=%d tilt=%.2f° [n=(%.3f,%.3f,%.3f) 分量 %.2f°/%.2f°] h0=%.3fm 内点=%zu neg=%zu | 2.5D %s",
+            "感知: 点云=%zu 平面valid=%d tilt=%.2f° [n=(%.3f,%.3f,%.3f) 分量 %.2f°/%.2f°] h0=%.3fm 内点=%zu neg=%zu fit=%s | 2.5D %s",
             cloud_base_.points.size(), static_cast<int>(seg_.plane.valid),
             std::acos(std::min(1.0, std::max(-1.0, static_cast<double>(seg_.plane.nz)))) *
                 180.0 / 3.14159265358979323846,
@@ -793,6 +797,7 @@ private:
                 180.0 / 3.14159265358979323846,
             static_cast<double>(seg_.plane.height_at_origin()),
             static_cast<size_t>(seg_.plane.inliers), seg_.negative_points.size(),
+            (seg_.used_ransac ? "ransac" : (seg_.used_cell ? "cell" : "none")),   // v2.9.16
             hm.valid ? hm.stats().c_str() : "invalid (无平面→fail-closed, 路1 静默)");
 
         have_perception_ = true;
