@@ -10,6 +10,12 @@
 三格实时画面：**红外（与深度同视场） / 深度（JET 伪彩） / 可行度 2.5D**，
 底部状态栏 `trav/up/down/steep/unknown + 平面 tilt/h0`。页面走 **MJPEG (:8080)**。
 
+> **深度面板数据源已换（v2.9.15, `3ae3634`）**：窗口不再订阅 **614KB 原始深度**，改订阅节点发的
+> **`/safety/depth_small`**（16UC1 320×240 = 1/2 抽点，≈154KB/帧）。节点侧参数 `publish_depth_small`（默认 true）；
+> 关掉它、或窗口/节点版本不配对时，深度面板显示 `no depth yet (need /safety/depth_small, node v2.9.15+)`。
+> **部署时两处必须同步**：`bash tools/deploy_all.sh` 推脚本 + 重启节点。
+> 等价性（本地 WSL 验证）：小图与源帧抽点**逐像素一致**；新旧窗口渲染**整帧 720×612 = 0/440,640 像素差异**（JPEG 逐字节相同）。
+
 ```bash
 bash /home/chj/pi_view_up.sh        # 重启窗口服务（自动清旧进程与端口）
 REC=30 bash /home/chj/pi_record.sh  # 录像 30s → /home/chj/report_YYYYmmdd_HHMMSS.mp4
@@ -54,6 +60,7 @@ python3 /home/chj/pi_replay.py /home/chj/frames_平地 10 1    # 每帧 @10Hz �
 |---|---|
 | `pi_gate_test.sh` | 深度质量守门行为验证（遮挡 / 半遮挡 / 条纹） |
 | `pi_depth_health.py` | 30~60s 深度流健康采样：帧率 / 有效像素占比 / 全零帧 / 坏帧计数 |
+| `pi_window_ab.sh` | **#9 真机验收**：窗口（旧/新）× 节点（`publish_depth_small` 关/开）四相位 CPU 对比 |
 | `pi_pitch_sweep.sh` | 俯仰角扫描（`cloud_pitch_rad` 0/15/25/35°）看 `in_fov` / `cov` / 假坑 |
 | `pi_grid_check.sh` | `/safety/terrain_grid` 速率 / 带宽 / 延迟 + 与 `status_text` 直方图互证 |
 | `pi_start_node.sh` | 起安全节点（含 `pkill` + 状态 / 感知 / 深度读数打印） |
@@ -83,6 +90,17 @@ bash tools/deploy_all.sh        # 从本机把 tools/ 下的脚本推到 Pi 的 
 - **深度偶发坏帧**：`valid=0.0% / 0 px` 的瞬时帧（30s 采样又 100% 健康，属间歇）。
   节点 v2.9.12 起 `status_text` 区分 **`DEPTH GATE (bad frame: …)`** 与 **`NO PLANE (fail-closed) …`**，
   现场一眼可辨是"数据坏"还是"构图坏"。
+
+## 窗口 CPU 归账（2026-09-25, 本地 x86 微基准，供优化决策)
+
+| 分量 | 成本 | 说明 |
+|---|---|---|
+| 深度回调（旧） | 1.342 ms/帧 | 掩码+JET+缩放 **1.17 ms 占大头**；614KB→float32 只有 0.091 ms |
+| 深度回调（新） | 1.245 ms/帧 | 去掉全分辨率转换 ✓（`/safety/depth_small` 方案） |
+| IR 回调 | 0.832 ms/帧 | **未优化**；「先抽点」变体 0.400 ms（**−52%**，输出逐像素相同） |
+| compose+JPEG | 1.493 ms/帧 | 两版相同；受渲染帧率影响最大 |
+
+⇒ 深度通道换小图的收益**主要在带宽**（−75%/帧），不在 Python CPU；想再降窗口 CPU，杠杆在 **IR 路径**。
 
 ## 依赖
 
