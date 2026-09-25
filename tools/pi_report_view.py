@@ -137,7 +137,9 @@ def compose():
     return np.vstack([canvas, bar])
 
 REC = float(__import__("os").environ.get("RECORD_SECONDS", "0") or 0)
-REC_STATE = {"writer": None, "t0": 0.0, "path": None, "done": False}
+NOMINAL_FPS = float(__import__("os").environ.get("RECORD_FPS", "25"))
+REC_STATE = {"writer": None, "t0": 0.0, "path": None, "done": False,
+             "last": 0.0, "n": 0, "acc": 0.0}
 
 def record_frame(img):
     import os, time as _t
@@ -147,16 +149,35 @@ def record_frame(img):
         os.makedirs("/home/chj", exist_ok=True)
         REC_STATE["path"] = "/home/chj/report_%s.mp4" % _t.strftime("%Y%m%d_%H%M%S")
         REC_STATE["writer"] = cv2.VideoWriter(REC_STATE["path"], cv2.VideoWriter_fourcc(*"mp4v"),
-                                              25.0, (img.shape[1], img.shape[0]))
+                                              NOMINAL_FPS, (img.shape[1], img.shape[0]))
         REC_STATE["t0"] = _t.time()
-        print("REC_START " + REC_STATE["path"], flush=True)
+        REC_STATE["last"] = _t.time()
+        print("REC_START %s (%g fps 标称)" % (REC_STATE["path"], NOMINAL_FPS), flush=True)
     cv2.circle(img, (26, 26), 9, (0, 0, 255), -1)
     cv2.putText(img, "REC", (44, 33), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 255), 2)
-    REC_STATE["writer"].write(img)
-    if _t.time() - REC_STATE["t0"] > REC:
+    # ★ v2.9.12 修复: 渲染速率达不到标称 fps 时, 按真实时间间隔补齐帧数
+    #   -> 录制文件时长 == 真实时长 (此前固定写 1 帧/次, 播放快 1.3x)
+    _now = _t.time()
+    if REC_STATE["last"] > 0:
+        # ★ 累加器(不是四舍五入): 余量留到下一轮, 误差不累积
+        #   round() 版会把 1.32 帧舍成 1 ⇒ 误差永远修不回来(实测 -24.7%)
+        REC_STATE["acc"] += (_now - REC_STATE["last"]) * NOMINAL_FPS
+        _n = int(REC_STATE["acc"])
+        REC_STATE["acc"] -= _n
+    else:
+        _n = 1
+    _n = min(_n, 60)                      # 护栏: 卡顿/断流时不要一次补几千帧
+    for _ in range(_n):
+        REC_STATE["writer"].write(img)
+    REC_STATE["last"] = _now
+    REC_STATE["n"] += _n
+    if _now - REC_STATE["t0"] > REC:
         REC_STATE["writer"].release()
         REC_STATE["done"] = True
-        print("REC_SAVED %s (%.1fs)" % (REC_STATE["path"], REC), flush=True)
+        _wall = _now - REC_STATE["t0"]
+        print("REC_SAVED %s (墙钟 %.1fs, 写入 %d 帧, 等效 %.1f fps ⇒ 按 %g fps 播放即实时)"
+              % (REC_STATE["path"], _wall, REC_STATE["n"],
+                 REC_STATE["n"] / max(0.001, _wall), NOMINAL_FPS), flush=True)
 
 
 def frames():
