@@ -233,7 +233,22 @@ public:
             ultrasonic_source_ = mechdog_ros::resolve_ultrasonic_source(
                 ultrasonic_requested_, use_simulated_, hw_ok, pubs, allow_simulated_ultrasonic_);
             ultrasonic_enabled_ = (ultrasonic_source_ != "none");
+            // v2.9.19 (复审批 B4): topic 来源在**首帧到达前一律不接入安全链**。
+            //   旧版启动即 enabled=true, 而超时看门狗要"收到过首帧"才武装(have_ultra_rx_)
+            //   ⇒ "有发布者但从未发帧"的窗口里 fuse() 消费的是算法库 read_all() 回落的
+            //   内部模拟随机数(valid=true, 底部 5% 造悬崖) —— 安全链里绝不能有这种数据。
+            //   首帧到达后走 ultra_sub_ 回调里的现成恢复路径(超声重新接入安全链)。
+            if (ultrasonic_source_ == "topic") {
+                ultrasonic_enabled_ = false;
+                RCLCPP_INFO(this->get_logger(),
+                    "超声来源=topic: 等待 /ultrasonic 首帧 —— 到达前超声不参与安全链 "
+                    "(防未注入时回落内部模拟随机数)");
+            }
             fusion_->set_ultrasonic_enabled(ultrasonic_enabled_);
+            // v2.9.19 (B4): 驱动注入超时与节点看门狗同源(旧版驱动 1.0s / 节点 500ms)
+            ultrasonic_->set_inject_timeout_sec(
+                static_cast<double>(ultrasonic_timeout_ms_) / 1000.0);
+            last_ultra_rx_ = std::chrono::steady_clock::now();   // 首帧等待计时起点
 
             if (ultrasonic_source_ == "none") {
                 RCLCPP_WARN(this->get_logger(),
@@ -327,6 +342,20 @@ public:
                             "/ultrasonic 已 %ld ms 无数据 → 超声退出安全链 "
                             "(避免回落模拟随机数; 数据恢复后自动接回)",
                             static_cast<long>(age_ms));
+                    }
+                }
+                // v2.9.19 (B4): 发布者存在但从未发过首帧 ⇒ 5s 时 WARN 一次 (现场可诊断)。
+                //   只针对"从未收到"; 收到过后再静默由上面的超时看门狗负责。
+                if (!ultrasonic_enabled_ && ultrasonic_source_ == "topic" &&
+                    !have_ultra_rx_ && !ultra_ever_rx_) {
+                    const auto age_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                        std::chrono::steady_clock::now() - last_ultra_rx_).count();
+                    if (age_ms > 5000 && !topic_wait_warned_) {
+                        topic_wait_warned_ = true;
+                        RCLCPP_WARN(this->get_logger(),
+                            "超声来源=topic 已 %.1f s 未收到任何 /ultrasonic 消息 —— 请检查"
+                            "发布端(ultrasonic_node/桥)是否在发; 期间超声不参与安全链",
+                            static_cast<double>(age_ms) / 1000.0);
                     }
                 }
                 // v2.4: 深度话题超时看门狗 —— 源断了就把帧标记失效 (fail-closed):
@@ -450,6 +479,7 @@ public:
                 // v2.5: 记录新鲜度 + 恢复入口 —— 真数据到了就把超声重新接回安全链
                 last_ultra_rx_ = std::chrono::steady_clock::now();
                 have_ultra_rx_ = true;
+                ultra_ever_rx_ = true;   // v2.9.19 (B4)
                 if (!ultrasonic_enabled_ && (ultrasonic_requested_ == "auto" ||
                                              ultrasonic_requested_ == "topic")) {
                     ultrasonic_source_ = "topic";
@@ -1156,6 +1186,8 @@ private:
     bool        allow_simulated_ultrasonic_ = false;
     int         ultrasonic_timeout_ms_ = 500;
     bool        have_ultra_rx_ = false;
+    bool        ultra_ever_rx_ = false;        // v2.9.19 (B4): 启动以来收到过首帧
+    bool        topic_wait_warned_ = false;    // v2.9.19 (B4): "5s 无首帧"告警只发一次
     std::chrono::steady_clock::time_point last_ultra_rx_{};
 
     // 深度来源 (v2.4): depth_source=topic 时的订阅与新鲜度状态
