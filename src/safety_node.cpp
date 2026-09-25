@@ -151,12 +151,25 @@ public:
         //   置 false 回到旧行为(供真机 A/B / 排查)。
         this->declare_parameter("cell_skip_ransac", true);
         gseg_params_.cell_skip_ransac = this->get_parameter("cell_skip_ransac").as_bool();
+        // v2.9.18 (N8): 护栏提示 —— 该开关只在 ground_fit_method=cell 时有意义
+        if (!gseg_params_.use_cell_min_fit && gseg_params_.cell_skip_ransac) {
+            RCLCPP_INFO(this->get_logger(),
+                "cell_skip_ransac=true 但 ground_fit_method≠cell ⇒ 该开关不生效 (cell 未启用)");
+        }
         // v2.9.17 (2026-09-25 师兄口径 ②, **仅观测不判定**): 深度可用性"时域"判据 ——
         //   连续 N 轮拿不到可用深度(无帧 / 质量守门 / 点云为空) ⇒ 标记"深度降级"并在日志与
         //   /safety/status_text 显式上报; 拿到好帧后自动解除。
         //   阈值(25%/300)与决策行为(fail-closed / 路1 abstain)一律不变 —— 把"静默"变"显式"。
         this->declare_parameter("depth_bad_streak_n", 3);
-        depth_bad_streak_n_ = static_cast<int>(this->get_parameter("depth_bad_streak_n").as_int());
+        {
+            // v2.9.18 (N8): 护栏 —— <1 时按 1 处理并告警 (否则"首个坏帧即上报"与原意不符)
+            const int streak_raw = static_cast<int>(this->get_parameter("depth_bad_streak_n").as_int());
+            if (streak_raw < 1) {
+                RCLCPP_WARN(this->get_logger(),
+                    "depth_bad_streak_n=%d (<1) ⇒ 按 1 处理; 建议 >=3", streak_raw);
+            }
+            depth_bad_streak_n_ = std::max(1, streak_raw);
+        }
         const double prior_override = this->declare_parameter("ground_prior_z", -999.0);
 
         cloud_E_.x     = cloud_x_;
@@ -196,6 +209,9 @@ public:
         if (publish_depth_small_) {
             depth_small_pub_ = this->create_publisher<sensor_msgs::msg::Image>("/safety/depth_small", 1);
         }
+        // v2.9.18 (N9): status_text 提前到构造期创建 —— 启动期深度全坏时该话题也要被
+        //   `ros2 topic list` 看到, 且降级文案(经 note_depth_bad)可以立即发布。
+        status_text_pub_ = this->create_publisher<std_msgs::msg::String>("/safety/status_text", 1);
         depth_topic_ = this->declare_parameter("depth_topic",
             std::string("/camera/depth/image_raw"));
         depth_info_topic_ = this->declare_parameter("depth_info_topic",
@@ -498,16 +514,33 @@ private:
         const size_t need = static_cast<size_t>(w) * static_cast<size_t>(h);
         std::vector<uint16_t> buf(need, 0);
         const std::string& enc = msg->encoding;
+        // v2.9.18 (B10): 按 msg->step (行步长) 逐行拷贝 —— 旧实现 memcpy(need*2) 假定
+        //   无行填充, 一旦驱动带 padding (step > width*2) 会把整幅图错位/错读。
         if (enc == "16UC1" || enc == "mono16") {
-            if (msg->data.size() < need * 2) return;
-            std::memcpy(buf.data(), msg->data.data(), need * 2);
+            const size_t row_bytes = static_cast<size_t>(w) * 2;
+            const size_t step = (msg->step >= row_bytes) ? static_cast<size_t>(msg->step) : row_bytes;
+            if (msg->data.size() < step * (static_cast<size_t>(h) - 1) + row_bytes) return;
+            if (step == row_bytes) {
+                std::memcpy(buf.data(), msg->data.data(), row_bytes * static_cast<size_t>(h));
+            } else {
+                for (int y = 0; y < h; ++y) {
+                    std::memcpy(buf.data() + static_cast<size_t>(y) * static_cast<size_t>(w),
+                                msg->data.data() + static_cast<size_t>(y) * step, row_bytes);
+                }
+            }
         } else if (enc == "32FC1") {
-            if (msg->data.size() < need * 4) return;
-            const float* src = reinterpret_cast<const float*>(msg->data.data());
-            for (size_t i = 0; i < need; ++i) {
-                const float m = src[i];
-                buf[i] = (std::isfinite(m) && m > 0.0f)
-                             ? static_cast<uint16_t>(m * 1000.0f + 0.5f) : 0;
+            const size_t row_bytes = static_cast<size_t>(w) * 4;
+            const size_t step = (msg->step >= row_bytes) ? static_cast<size_t>(msg->step) : row_bytes;
+            if (msg->data.size() < step * (static_cast<size_t>(h) - 1) + row_bytes) return;
+            for (int y = 0; y < h; ++y) {
+                const float* src = reinterpret_cast<const float*>(
+                    msg->data.data() + static_cast<size_t>(y) * step);
+                uint16_t* dst = buf.data() + static_cast<size_t>(y) * static_cast<size_t>(w);
+                for (int x = 0; x < w; ++x) {
+                    const float m = src[x];
+                    dst[x] = (std::isfinite(m) && m > 0.0f)
+                                 ? static_cast<uint16_t>(m * 1000.0f + 0.5f) : 0;
+                }
             }
         } else {
             RCLCPP_WARN_THROTTLE(this->get_logger(), *this->get_clock(), 5000,
@@ -590,17 +623,29 @@ private:
 
     // v2.9.17 (口径 ②, 仅观测): 记录"本轮拿不到可用深度"。不改变任何判定/阈值/决策行为。
     void note_depth_bad(int reason) {   // 0=无帧 1=质量守门 2=点云为空
-        if (!depth_ever_good_) return;  // 启动期(还没见过好帧)不计, 避免噪声
+        // v2.9.18 (N9): 启动期(从未见过好帧)也计入 —— "相机没插/USB 没起/驱动失败"恰是最
+        //   需要告警的场景; 旧版这里直接 return, 把它整个排除了。防启动瞬态误报: 未见过好帧
+        //   时首次升级门槛提高为 max(30, depth_bad_streak_n_) 轮(≈3s@10Hz)。仅观测, 不改判定。
         depth_last_reason_ = reason;
         if (depth_bad_streak_ == 0) depth_bad_t0_ = this->now().seconds();
         ++depth_bad_streak_;
+        const int eff_n = depth_ever_good_
+            ? std::max(1, depth_bad_streak_n_)
+            : std::max(30, depth_bad_streak_n_);
         const char* why = (reason == 0) ? "no frame" : (reason == 2) ? "empty cloud" : "quality gate";
-        if (depth_bad_streak_ == std::max(1, depth_bad_streak_n_) && !depth_degraded_) {
+        if (depth_bad_streak_ == eff_n && !depth_degraded_) {
             depth_degraded_ = true;
-            RCLCPP_WARN(this->get_logger(),
-                "深度降级: 连续 %d 轮拿不到可用深度 (%.2fs, 最近原因=%s) ⇒ 路1/2.5D 持续 abstain (与单帧同口径, 行为不变); "
-                "排查方向 = 相机/USB/光照, 不是安装角。好帧自动解除 (参数 depth_bad_streak_n=%d)",
-                depth_bad_streak_, this->now().seconds() - depth_bad_t0_, why, depth_bad_streak_n_);
+            if (!depth_ever_good_) {
+                RCLCPP_WARN(this->get_logger(),
+                    "深度降级(启动期): 启动以来连续 %d 轮拿不到可用深度 (%.2fs, 最近原因=%s) —— "
+                    "疑似相机/USB/驱动未就绪 (或镜头盖未摘); \"从未见过好帧\"不是正常状态",
+                    depth_bad_streak_, this->now().seconds() - depth_bad_t0_, why);
+            } else {
+                RCLCPP_WARN(this->get_logger(),
+                    "深度降级: 连续 %d 轮拿不到可用深度 (%.2fs, 最近原因=%s) ⇒ 路1/2.5D 持续 abstain (与单帧同口径, 行为不变); "
+                    "排查方向 = 相机/USB/光照, 不是安装角。好帧自动解除 (参数 depth_bad_streak_n=%d)",
+                    depth_bad_streak_, this->now().seconds() - depth_bad_t0_, why, depth_bad_streak_n_);
+            }
         }
         if (depth_degraded_) {
             // 降级期间每轮刷新一次(1Hz 节流), 保证窗口里看到的就是"当前"状态
@@ -612,12 +657,16 @@ private:
         }
     }
     void note_depth_good() {
+        const bool first_ever = !depth_ever_good_;
         depth_ever_good_ = true;
         if (depth_bad_streak_ == 0) return;
         const double dt = this->now().seconds() - depth_bad_t0_;
         if (depth_degraded_) {
             RCLCPP_WARN(this->get_logger(),
                 "深度恢复: 此前连续 %d 轮不可用 (%.2fs) ⇒ 降级解除", depth_bad_streak_, dt);
+        } else if (first_ever) {
+            RCLCPP_INFO(this->get_logger(),
+                "深度流就绪: 启动期 %d 轮无可用深度 (%.2fs) 后拿到首帧", depth_bad_streak_, dt);
         } else {
             RCLCPP_INFO_THROTTLE(this->get_logger(), *this->get_clock(), 5000,
                 "深度瞬时坏帧已恢复 (连续 %d 轮, 未达降级阈值 %d)", depth_bad_streak_, depth_bad_streak_n_);
@@ -1090,10 +1139,10 @@ private:
     int     depth_bad_streak_   = 0;      // 当前连续坏帧轮数 (好帧清零)
     double  depth_bad_t0_       = 0.0;    // 本段坏帧起始时刻 (秒)
     bool    depth_degraded_     = false;  // 是否已上报"降级"
-    bool    depth_ever_good_    = false;  // 见过好帧后才计数 (避免启动噪声)
+    bool    depth_ever_good_    = false;  // 是否见过好帧 (v2.9.18 N9: 启动期也计数, 仅门槛提高)
     int     depth_last_reason_  = -1;     // 最近一次原因: 0=无帧 1=质量守门 2=点云为空
     double  last_degraded_status_s_ = -1e9;  // 上次主动发降级文案的时刻 (1Hz 节流)
-    rclcpp::Publisher<std_msgs::msg::String>::SharedPtr status_text_pub_;   // 懒创建
+    rclcpp::Publisher<std_msgs::msg::String>::SharedPtr status_text_pub_;   // v2.9.18: 构造期已创建
     double  depth_gate_vr_   = 0.0;   // 本轮的深度有效率
     size_t  depth_gate_px_   = 0;     // 本轮的有效像素数
     double cloud_pitch_rad_ = 0.2617994; // 15°
