@@ -131,13 +131,15 @@ if(BUILD_TESTING)
   find_package(ament_lint_auto REQUIRED)
   ament_lint_auto_find_test_dependencies()
   find_package(ament_cmake_gtest REQUIRED)
-  ament_add_gtest(test_smoke test/test_smoke.cpp)
+  # v2.9.18 (A3): 4 个测试各自带 main(), 补 SKIP_LINKING_MAIN_LIBRARIES —— 去掉对
+  #   "gtest_main 归档成员恰好不被拉入"的脆弱前提依赖 (换工具链/优化级别可能触发重定义)
+  ament_add_gtest(test_smoke test/test_smoke.cpp SKIP_LINKING_MAIN_LIBRARIES)
   target_include_directories(test_smoke PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
   target_compile_features(test_smoke PRIVATE cxx_std_20)
   # REVIEW R5 (v2.3): fail-closed 跨层集成测试 —— 注入全失效帧, 断言 fuse()→plan() 输出 STOP/零速
   # (对应 docs/REVIEW_FIXPLAN.md R5: 防 ROS 层 reinterpret min_fwd=8.0 重现 fail-open)
   # R4: 含启动预热 wait_for_bottom_ready (safety_warmup.hpp 在 src/)
-  ament_add_gtest(test_safety_fail_closed test/test_safety_fail_closed.cpp)
+  ament_add_gtest(test_safety_fail_closed test/test_safety_fail_closed.cpp SKIP_LINKING_MAIN_LIBRARIES)
   target_include_directories(test_safety_fail_closed PRIVATE
     ${MECHDOG_ALGO_DIR}
     ${CMAKE_CURRENT_SOURCE_DIR}/src)
@@ -145,13 +147,13 @@ if(BUILD_TESTING)
   target_link_libraries(test_safety_fail_closed mechdog_algo)
 
   # v2.5: 超声来源解析 (纯函数, 只依赖自身头文件)
-  ament_add_gtest(test_ultrasonic_source test/test_ultrasonic_source.cpp)
+  ament_add_gtest(test_ultrasonic_source test/test_ultrasonic_source.cpp SKIP_LINKING_MAIN_LIBRARIES)
   if(TARGET test_ultrasonic_source)
     target_include_directories(test_ultrasonic_source PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
   endif()
 
   # v2.6: 相机几何 → 地面高度先验 (纯函数; 台架 0.6m / 装机 0.2m 只差一个参数)
-  ament_add_gtest(test_sensor_geometry test/test_sensor_geometry.cpp)
+  ament_add_gtest(test_sensor_geometry test/test_sensor_geometry.cpp SKIP_LINKING_MAIN_LIBRARIES)
   if(TARGET test_sensor_geometry)
     target_include_directories(test_sensor_geometry PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
   endif()

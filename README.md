@@ -2,7 +2,7 @@
 
 将 `mechdog_navigation` 纯算法库（SensorFusion + PathPlanner）封装为 ROS2 节点，作为机械狗巡检的**局部安全层**，与 `quadruped_ws` 全局栈（Nav2 + 激光雷达 + AMCL + 栅格地图 + 安全闸门 + STM32 底盘桥）通过话题对接，构成完整的三库系统。
 
-> **真机状态（2026-09-25）**：已在 Pi 5B（Ubuntu 24.04 + Jazzy + Astra Pro）跑通 —— 深度订阅 ≈30Hz、控制路径端到端 **≈34ms**（不过网络）；上位机/远程接口用 `/safety/terrain_grid`（4848 B/帧 ≈ **0.39 Mbit/s**，2.4GHz 弱网可传）。当前版本 **v2.9.17**。
+> **真机状态（2026-09-25）**：已在 Pi 5B（Ubuntu 24.04 + Jazzy + Astra Pro）跑通 —— 深度订阅 ≈30Hz、控制路径端到端 **≈34ms**（不过网络；证据 `docs/PERF_TIMING_EVIDENCE.md`）；上位机/远程接口用 `/safety/terrain_grid`（4848 B/帧 ≈ **0.39 Mbit/s**，2.4GHz 弱网可传）。当前版本 **v2.9.17**。
 
 ## 三库架构总览
 
@@ -116,7 +116,7 @@ ros2 run mechdog_ultrasonic ultrasonic_node
 - **地面提取（v2.9.16，口径①）**：`cell` 成功时跳过 RANSAC（`cell_skip_ransac:=false` 可回历史行为）；同工装对照平面精度 0.98°/1.39° → **0.02°**，节点日志带 `fit=cell/ransac` 供现场判定。
 - **前向全盲行为（接真机前必读）**：算法库在前向三方向全部失效（镜头被挡 + 三颗前向超声全坏）时输出 `SLOW_FORWARD` 降速盲行（仅 bottom 悬崖兜底），**不是 STOP**。接机械狗前务必与师兄闸门确认该场景有叠加保护；若本层是最后防线，按 mechdog_navigation README「已知限制」#7 把该分支改为 `STOP`。
 
-## 参数一览（safety_node）
+## 参数一览（safety_node，共 32 个）
 
 `ros2 param set /safety_node <名> <值>` 或 `--ros-args -p <名>:=<值>` 均可改；标 ★ 的另有 launch 透传（`xxx:=值`）。
 
@@ -308,6 +308,7 @@ Pi 上真机运行/汇报用的一组脚本（实时窗口、抓帧取证、离�
 - [x] 深度真机化（Astra 驱动节点发 /camera/depth/image_raw → `depth_source:=topic`，实测 ≈30Hz；控制路径端到端 ≈34ms）
 - [x] 2.5D 地形接口（`/safety/terrain_map` 渲染 + `/safety/terrain_grid` 紧凑网格 + `/safety/status_text`；grid ≈0.39 Mbit/s 供上位机）
 - [x] 深度守门时域上报（v2.9.17：连续坏帧 ⇒ 降级显式上报，纯观测）
+- [x] 稳健性修复批（v2.9.18）：启动期深度全坏可告警〔N9〕/ `msg->step` 行步长拷贝〔B10〕/ 模拟模式地形守门生效〔N7〕/ TF roll·yaw 与算法侧同源〔B2〕
 - [x] 地面提取双路径 + cell 跳过 RANSAC（v2.9.16：精度 0.98°/1.39° → 0.02°）
 - [x] 汇报窗口工具（tools/：实时窗口 + 抓帧/回放 + A/B 脚本）
 - [ ] 真机超声波（HC-SR04 实机数据 = STM32 0x02 上报经桥节点补丁 → /ultrasonic，**待师兄固件+桥补丁落地**；备选本包 GPIO 路径）
