@@ -136,7 +136,8 @@ def generate_launch_description():
             }],
         ),
         # 近场点云坐标: base_link -> camera_link 静态变换 (roll/pitch/yaw 弧度;
-        # 与算法库 CameraExtrinsics 默认值一致, 外参标定后同步更新).
+        # v2.9.18 (B2): roll/yaw 改为取 launch 参数 —— 与算法侧 cloud_* 严格同源
+        #   (此前硬编码 0.0, 标定 cloud_roll_rad/camera_yaw_rad 后 TF 不跟, 两轴漂移).
         # 注意: 必须用键值对形式 —— Iron 起 static_transform_publisher 位置参数已弃用,
         # lyrical 上位置参数直接解析失败 (Frame id must not be empty), 真机实测踩过.
         Node(
@@ -149,9 +150,9 @@ def generate_launch_description():
                 '--x', LaunchConfiguration('camera_x'),
                 '--y', '0.0',
                 '--z', LaunchConfiguration('camera_z'),
-                '--roll', '0.0',
+                '--roll', LaunchConfiguration('camera_roll_rad'),
                 '--pitch', LaunchConfiguration('camera_pitch_rad'),
-                '--yaw', '0.0',
+                '--yaw', LaunchConfiguration('camera_yaw_rad'),
                 '--frame-id', 'base_link',
                 '--child-frame-id', 'camera_link',
             ],
