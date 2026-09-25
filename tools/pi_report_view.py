@@ -26,7 +26,7 @@ class Viewer(Node):
         super().__init__("report_view")
         q = be()
         self.create_subscription(Image, "/camera/ir/image_raw", self.on_color, q)   # 彩色彩 HW 故障 → 用红外(同视场)
-        self.create_subscription(Image, "/camera/depth/image_raw", self.on_depth, q)
+        self.create_subscription(Image, "/safety/depth_small", self.on_depth, q)   # v2.9.15: 节点已 1/2 抽点, 窗口不再取 614KB 原始深度
         self.create_subscription(Image, "/safety/terrain_map", self.on_terrain, q)
         self.create_subscription(String, "/safety/status_text", self.on_status, 10)
 
@@ -72,8 +72,9 @@ class Viewer(Node):
                 d = np.frombuffer(m.data, np.float32).reshape(m.height, m.width) * 1000.0
             else:
                 return
-            med = float(np.nanmedian(d[::4, ::4]))    # 抽样算中位数(16x 便宜), 数值等价
-            d = d[::2, ::2]                            # 上色只在 320x240 上做 ⇒ 4x 便宜
+            # v2.9.15: 输入已是节点 1/2 抽点后的 320x240 ⇒ 不再抽点。
+            # 中位数抽样取 [::2,::2](= 原始 640x480 的 [::4,::4]) ⇒ 与旧版取样点完全一致。
+            med = float(np.nanmedian(d[::2, ::2]))
             v = d.copy()
             v[(v < 200) | (v > 6000)] = np.nan
             v = np.clip((v - 300.0) / (4000.0 - 300.0), 0, 1)
@@ -106,7 +107,7 @@ def compose():
     with lock:
         c, d, t, s = state["color"], state["depth"], state["terrain"], state["status"]
     c = panel_or_note(c, "no IR / camera image yet")
-    d = panel_or_note(d, "no depth yet")
+    d = panel_or_note(d, "no depth yet (need /safety/depth_small, node v2.9.15+)")
     t = panel_or_note(t, "no terrain map yet (start safety_node)")
     blank = np.full((H_PANEL, W_PANEL, 3), 30, np.uint8)
     canvas = np.vstack([np.hstack([c, d]), np.hstack([t, blank])])

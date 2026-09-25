@@ -179,6 +179,13 @@ public:
         //   "sdk"       : Astra SDK 直读 (需 USE_ASTRA_SDK 编译)
         //   "simulated" : 模拟帧
         depth_source_ = this->declare_parameter("depth_source", std::string("auto"));
+        // v2.9.15 (OFFLINE_TODO #9): 汇报用小图 —— 窗口不再订阅 614KB 原始深度。
+        //   节点侧 1/2 抽点后发布 16UC1 320x240(约153KB/帧); 窗口此前自己就在做同样的
+        //   1/2 抽点 ⇒ 显示结果逐像素不变。纯显示通道, 不参与任何判定。
+        publish_depth_small_ = this->declare_parameter("publish_depth_small", true);
+        if (publish_depth_small_) {
+            depth_small_pub_ = this->create_publisher<sensor_msgs::msg::Image>("/safety/depth_small", 1);
+        }
         depth_topic_ = this->declare_parameter("depth_topic",
             std::string("/camera/depth/image_raw"));
         depth_info_topic_ = this->declare_parameter("depth_info_topic",
@@ -497,6 +504,8 @@ private:
                 "深度话题编码不支持: %s (仅 16UC1/mono16/32FC1)", enc.c_str());
             return;
         }
+        // v2.9.15: 顺手发一份 1/2 抽点小图给汇报窗口(在注入之前, 不影响注入结果)
+        publish_depth_small(buf, w, h, msg->header);
         const double stamp_s = static_cast<double>(msg->header.stamp.sec)
                              + static_cast<double>(msg->header.stamp.nanosec) * 1e-9;
         const auto t_inj0 = std::chrono::steady_clock::now();
@@ -508,6 +517,34 @@ private:
         // 主线程耗时(供感知线程一并打印; 仅日志用, 允许无锁读取)
         ms_decode_ = std::chrono::duration<double, std::milli>(t_inj0 - t_img0).count();
         ms_inject_ = std::chrono::duration<double, std::milli>(t_inj1 - t_inj0).count();
+    }
+
+    // v2.9.15 (OFFLINE_TODO #9): 汇报用小图 —— 1/2 抽点(640x480→320x240)后发布。
+    // 目的: 汇报窗口不再订阅 614KB 原始深度并做全分辨率 float32 转换(此前窗口 CPU 大户)。
+    // 显示等价性: 窗口原本自己在 Python 里做同样的 1/2 抽点 ⇒ 画面逐像素不变。
+    // 只做整数抽点, 不新建全分辨率缓冲 ⇒ 成本(估算, 待真机实测) 约 0.2~0.5ms/帧。
+    void publish_depth_small(const std::vector<uint16_t>& buf, int w, int h,
+                             const std_msgs::msg::Header& header) {
+        if (!depth_small_pub_) return;
+        const int w2 = w / 2, h2 = h / 2;
+        if (w2 <= 0 || h2 <= 0) return;
+        auto img = std::make_unique<sensor_msgs::msg::Image>();
+        img->header = header;
+        img->height = static_cast<uint32_t>(h2);
+        img->width  = static_cast<uint32_t>(w2);
+        img->encoding = "16UC1";
+        img->is_bigendian = 0;
+        img->step = static_cast<uint32_t>(w2) * 2u;
+        img->data.resize(static_cast<size_t>(w2) * static_cast<size_t>(h2) * 2u);
+        uint16_t* dst = reinterpret_cast<uint16_t*>(img->data.data());
+        for (int y = 0; y < h2; ++y) {
+            const uint16_t* srow = buf.data() + static_cast<size_t>(y * 2) * static_cast<size_t>(w);
+            uint16_t* drow = dst + static_cast<size_t>(y) * static_cast<size_t>(w2);
+            for (int x = 0; x < w2; ++x) {
+                drow[x] = srow[x * 2];
+            }
+        }
+        depth_small_pub_->publish(std::move(img));
     }
 
     // 深度内参话题 → 替换 FOV 反推内参 (点云 / 2.5D / 路1 全部受益)
@@ -991,6 +1028,9 @@ private:
     std::string depth_source_ = "auto";
     std::string depth_topic_ = "/camera/depth/image_raw";
     std::string depth_info_topic_ = "/camera/depth/camera_info";
+    // v2.9.15: 汇报用小图发布 (1/2 抽点深度; 见 publish_depth_small)
+    bool publish_depth_small_ = true;
+    rclcpp::Publisher<sensor_msgs::msg::Image>::SharedPtr depth_small_pub_;
     int  depth_timeout_ms_ = 500;
     bool have_depth_rx_ = false;       // 收到过话题帧 (供超时看门狗判断)
     bool have_camera_info_ = false;
