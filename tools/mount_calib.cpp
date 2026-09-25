@@ -6,6 +6,9 @@
 // 用法: mount_calib --intr intr.txt [--step 8] [--z 0 --x 0] [--prior 0.35]
 //                   [--p0 -2] [--p1 18] [--r0 -8] [--r1 8] [--y0 -12] [--y1 12]
 //                   [--coarse 2] [--fine 0.25] [--cell] frames...
+// v2.9.18 稳健性: 数值参数缺值/非法 ⇒ 报错退出(不再静默吞下一个参数; 旧版 `--z --cell`
+//   会把 `--cell` 当 0 吃掉); `--step` 必须 >=1; 载入时剔除坏帧(有效像素 <25%);
+//   yaw 仅在可辨识时给建议值(单水平面观测不出, 详见结尾输出)。
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
@@ -29,6 +32,12 @@ static bool load_raw(const std::string& p, int W, int H, std::vector<uint16_t>& 
 static double tilt_deg(const GroundPlane& pl) {
     return std::acos(std::min(1.0, std::max(-1.0, pl.nz))) / 0.01745329251994329576;
 }
+// v2.9.18: 有效像素计数 (口径同 sensor_astra.h: 600~8000mm) —— 供坏帧预过滤
+static size_t count_valid_raw(const std::vector<uint16_t>& d) {
+    size_t n = 0;
+    for (uint16_t v : d) if (v >= 600 && v <= 8000) ++n;
+    return n;
+}
 
 int main(int argc, char** argv) {
     const int W = 640, H = 480;
@@ -41,35 +50,64 @@ int main(int argc, char** argv) {
     std::vector<std::string> frames;
     for (int i = 1; i < argc; ++i) {
         std::string a = argv[i];
-        auto nx = [&](double d) { return (i + 1 < argc) ? atof(argv[++i]) : d; };
-        if (a == "--intr") intr_path = (i + 1 < argc) ? argv[++i] : "";
-        else if (a == "--step") step = (int)nx(step);
-        else if (a == "--z") ext_z = nx(ext_z);
-        else if (a == "--x") ext_x = nx(ext_x);
-        else if (a == "--prior") prior = nx(prior);
-        else if (a == "--prior-z") prior_z = nx(prior_z);
-        else if (a == "--tilt") max_tilt = nx(max_tilt);
-        else if (a == "--p0") p0 = nx(p0); else if (a == "--p1") p1 = nx(p1);
-        else if (a == "--r0") r0 = nx(r0); else if (a == "--r1") r1 = nx(r1);
-        else if (a == "--y0") y0 = nx(y0); else if (a == "--y1") y1 = nx(y1);
-        else if (a == "--coarse") coarse = nx(coarse);
-        else if (a == "--fine") fine = nx(fine);
+        auto nx = [&](const char* name, double d) -> double {
+            // v2.9.18 (T4): 缺值/非法值 ⇒ 立即报错。旧版 atof 静默吞参:
+            //   `--z --cell` 会把 `--cell` 当 0.0 吃掉并输出一组错误外参。
+            if (i + 1 >= argc) { printf("%s 缺参数值\n", name); exit(2); }
+            char* end = nullptr;
+            const double v = std::strtod(argv[++i], &end);
+            if (end == argv[i] || *end != '\0') {
+                printf("%s 参数值无效: '%s'\n", name, argv[i]); exit(2);
+            }
+            return v;
+        };
+        if (a == "--intr") {
+            if (i + 1 >= argc) { printf("--intr 缺参数值\n"); return 2; }
+            intr_path = argv[++i];
+        }
+        else if (a == "--step") step = (int)nx("--step", step);
+        else if (a == "--z") ext_z = nx("--z", ext_z);
+        else if (a == "--x") ext_x = nx("--x", ext_x);
+        else if (a == "--prior") prior = nx("--prior", prior);
+        else if (a == "--prior-z") prior_z = nx("--prior-z", prior_z);
+        else if (a == "--tilt") max_tilt = nx("--tilt", max_tilt);
+        else if (a == "--p0") p0 = nx("--p0", p0); else if (a == "--p1") p1 = nx("--p1", p1);
+        else if (a == "--r0") r0 = nx("--r0", r0); else if (a == "--r1") r1 = nx("--r1", r1);
+        else if (a == "--y0") y0 = nx("--y0", y0); else if (a == "--y1") y1 = nx("--y1", y1);
+        else if (a == "--coarse") coarse = nx("--coarse", coarse);
+        else if (a == "--fine") fine = nx("--fine", fine);
         else if (a == "--cell") use_cell = true;
         else frames.push_back(a);
     }
     if (intr_path.empty() || frames.empty()) { printf("参数不全\n"); return 2; }
+    if (step < 1) { printf("--step 必须 >= 1 (推荐 4~16); 收到 %d\n", step); return 2; }
+    if (coarse <= 0.0 || fine <= 0.0) { printf("--coarse/--fine 必须 > 0\n"); return 2; }
     CameraIntrinsics K; {
         std::ifstream f(intr_path); double w,h,fx,fy,cx,cy;
         if (!(f >> w >> h >> fx >> fy >> cx >> cy) || fx <= 0) { printf("内参失败\n"); return 2; }
         K.fx = fx; K.fy = fy; K.cx = cx; K.cy = cy;
     }
     // 预加载 + 一次反投影 (与 E 无关, 只做一次)
-    std::vector<PointCloud> opt(frames.size());
+    // v2.9.18 (T4): 坏帧(全零/低有效, 真机已知现象)载入时剔除 —— 旧版"任一帧拟合失败
+    //   即整体作废"会把正确外参否掉; 有效帧之间仍保持严格多帧联合(防假解设计不变)。
+    std::vector<PointCloud> opt;
+    size_t dropped = 0;
     for (size_t i = 0; i < frames.size(); ++i) {
         std::vector<uint16_t> raw;
         if (!load_raw(frames[i], W, H, raw)) { printf("读帧失败 %s\n", frames[i].c_str()); return 2; }
-        depth_to_cloud(raw.data(), W, H, K, opt[i]);
+        const size_t nv = count_valid_raw(raw);
+        if (nv * 4 < raw.size()) {   // <25% (与节点深度守门口径一致)
+            printf("剔除坏帧 %s (有效像素 %zu/%zu = %.1f%%)\n",
+                   frames[i].c_str(), nv, raw.size(), 100.0 * (double)nv / (double)raw.size());
+            ++dropped;
+            continue;
+        }
+        PointCloud pc;
+        depth_to_cloud(raw.data(), W, H, K, pc);
+        opt.push_back(pc);
     }
+    if (opt.empty()) { printf("全部帧均无效 —— 检查帧文件 / 内参\n"); return 2; }
+    if (dropped) printf("注意: 已剔除 %zu/%zu 帧\n", dropped, frames.size());
     GroundSegParams gp; gp.ground_prior_z = prior_z; gp.prior_window = prior;
     gp.plane_max_tilt_deg = max_tilt; gp.use_cell_min_fit = use_cell;
     const double D2R = 0.01745329251994329576;
@@ -105,7 +143,7 @@ int main(int argc, char** argv) {
             if (eval(p, r, y, &t, &h0, &inl)) all.push_back({p, r, y, t, h0, inl});
         }
     };
-    printf("帧数=%zu step=%d prior=%.2f@%.2f cell=%d\n", frames.size(), step, prior, prior_z, (int)use_cell);
+    printf("帧数=%zu step=%d prior=%.2f@%.2f cell=%d (剔除坏帧 %zu)\n", opt.size(), step, prior, prior_z, (int)use_cell, dropped);
     scan(p0, p1, coarse, r0, r1, coarse, y0, y1, coarse);
     printf("粗扫完成: %zu 个有效候选\n", all.size());
     if (all.empty()) { printf("无有效候选 —— 放宽 --prior 或扩大范围\n"); return 1; }
@@ -126,6 +164,18 @@ int main(int argc, char** argv) {
         printf("精扫最优: pitch=%.3f roll=%.3f yaw=%.3f  tilt=%.3f  h0=%.3f  inl=%.0f\n", bf.p, bf.r, bf.y, bf.t, bf.h0, bf.inl);
         b1 = bf;
     }
+    // v2.9.18 (T4): yaw 可辨识性检查 —— 单水平面观测不出 yaw (绕竖轴转不改变平面倾角)。
+    //   ±3° 微扰下平均 tilt 几乎不变 ⇒ 打警告, 且"建议参数"里不再照抄一个纯噪声值。
+    bool   yaw_identifiable = false;
+    double yaw_tilt_span = -1.0;
+    {
+        double tp, hp, ip, tm, hm, im;
+        if (eval(b1.p, b1.r, b1.y + 3.0, &tp, &hp, &ip) &&
+            eval(b1.p, b1.r, b1.y - 3.0, &tm, &hm, &im)) {
+            yaw_tilt_span = std::max(std::fabs(tp - b1.t), std::fabs(tm - b1.t));
+            yaw_identifiable = yaw_tilt_span > 0.05;   // 0.05° 灵敏度门限
+        }
+    }
     // top-8 (粗+精合并)
     all.insert(all.end(), fine_list.begin(), fine_list.end());
     std::sort(all.begin(), all.end(), [](const Cand& a, const Cand& b) { return a.t < b.t; });
@@ -133,6 +183,16 @@ int main(int argc, char** argv) {
     for (size_t i = 0; i < all.size() && i < 8; ++i)
         printf("  #%zu pitch=%+.2f roll=%+.2f yaw=%+.2f  tilt=%.3f  h0=%.3f  inl=%.0f\n",
                i + 1, all[i].p, all[i].r, all[i].y, all[i].t, all[i].h0, all[i].inl);
-    printf("=== 建议参数 (度): pitch=%.2f roll=%.2f yaw=%.2f ===\n", b1.p, b1.r, b1.y);
+    if (yaw_identifiable) {
+        printf("=== 建议参数 (度): pitch=%.2f roll=%.2f yaw=%.2f ===\n", b1.p, b1.r, b1.y);
+        printf("    (yaw 可辨识性: ±3° 微扰 tilt 变化 %.3f°, 通过)\n", yaw_tilt_span);
+    } else {
+        printf("=== 建议参数 (度): pitch=%.2f roll=%.2f ===\n", b1.p, b1.r);
+        if (yaw_tilt_span >= 0.0)
+            printf("    !! yaw 不可辨识: ±3° 微扰下 tilt 变化仅 %.3f° (<0.05°) —— 单水平面观测不出,\n"
+                   "       不要照抄候选表里的 yaw; 装夹对齐机体后按 0 处理 (见 launch camera_yaw_rad 注)\n", yaw_tilt_span);
+        else
+            printf("    !! yaw 不可辨识: 微扰帧拟合失败无法评估; 单水平面观测不出, 请勿照抄 yaw\n");
+    }
     return 0;
 }

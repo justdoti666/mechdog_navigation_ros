@@ -58,7 +58,7 @@ python3 /home/chj/pi_replay.py /home/chj/frames_平地 10 1    # 每帧 @10Hz �
 
 | 脚本 | 用途 |
 |---|---|
-| `pi_gate_test.sh` | 深度质量守门行为验证（遮挡 / 半遮挡 / 条纹） |
+| `pi_gate_test.sh` | 深度质量守门（半自动：生成全 0 帧文件；**真注入流程待补** ⚠） |
 | `pi_depth_health.py` | 30~60s 深度流健康采样：帧率 / 有效像素占比 / 全零帧 / 坏帧计数 |
 | `pi_window_ab.sh` | **#9 真机验收**：窗口（旧/新）× 节点（`publish_depth_small` 关/开）四相位 CPU 对比 |
 | `pi_pitch_sweep.sh` | 俯仰角扫描（`cloud_pitch_rad` 0/15/25/35°）看 `in_fov` / `cov` / 假坑 |
@@ -68,12 +68,13 @@ python3 /home/chj/pi_replay.py /home/chj/frames_平地 10 1    # 每帧 @10Hz �
 ## 5 标定
 
 - `mount_calib.cpp`：离线三参数标定器（本地编译，用法见文件头注释）。
+- v2.9.18 加固：yaw 不可辨识时**不给建议值**（单水平面观测不出）；坏帧自动剔除；缺值/非法参数与 `--step 0` 直接报错（不再静默吞参/死循环）。
 - 装机后流程见仓库外文档 `SOP_MOUNT_CALIB_ON_ROBOT.md`（含装夹复核判据 `tilt<2°` 且 `h0≈−镜头高`）。
 
 ## 6 部署
 
 ```bash
-bash tools/deploy_all.sh        # 从本机把 tools/ 下的脚本推到 Pi 的 /home/chj/
+bash tools/deploy_all.sh        # 完整部署: 核心改动 + ROS 包 + tools/*.sh|*.py → Pi (/home/chj/)
 ```
 
 ---
