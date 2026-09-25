@@ -124,7 +124,7 @@ ros2 run mechdog_ultrasonic ultrasonic_node
 |---|---|---|---|
 | 来源/模式 | `use_simulated`★ | true | true=PC 模拟（无需硬件）；false=真机 |
 | | `depth_source`★ | auto | auto / **topic**（订 ROS 深度话题，Pi 用）/ sdk（Astra SDK 直读）/ simulated |
-| | `depth_topic`★（`depth_info_topic` 同名透传无） | /camera/depth/image_raw | 深度来源=topic 时的话题名 |
+| | `depth_topic`★ / `depth_info_topic` | /camera/depth/image_raw / /camera/depth/camera_info | 深度来源=topic 时的话题名（info 用 `param set` 改，无 launch 透传） |
 | | `depth_timeout_ms`★ | 500 | 深度帧超时（ms）⇒ 标失效（fail-closed，决策只剩超声） |
 | | `ultrasonic_source`★ | auto | auto / topic / hardware / simulated（仅台架）/ none |
 | | `allow_simulated_ultrasonic`★ | false | 真机模式把模拟超声接进安全链（默认拒绝，防假悬崖） |
