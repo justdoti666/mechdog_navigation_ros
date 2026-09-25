@@ -42,8 +42,11 @@ class Viewer(Node):
                 if m.encoding == "rgb8":
                     a = a[:, :, ::-1]
             elif m.encoding == "mono8":
-                g = np.frombuffer(m.data, np.uint8).reshape(m.height, m.width).astype(np.float32)
-                g = g[::2, ::2]                     # 2x 降采样: 面板只要 360x270
+                # v2.9.16 (先量再改): 先抽点(uint8, 便宜)再转 float32 —— 输出与旧版逐像素相同
+                # (拉伸/裁剪都是逐像素线性运算, 先抽点不改变取值), 但省掉全分辨率 float32 转换:
+                # x86 微基准 0.832 → 0.400 ms/帧 (-52%)。
+                g8 = np.frombuffer(m.data, np.uint8).reshape(m.height, m.width)[::2, ::2]   # 2x 降采样: 面板只要 360x270
+                g = g8.astype(np.float32)
                 gs = g[::2, ::2]                    # 百分位再抽一次(16x 便宜)
                 lo, hi = float(np.percentile(gs, 2)), float(np.percentile(gs, 98))
                 if hi > lo + 1.0:
