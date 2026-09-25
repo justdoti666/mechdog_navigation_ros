@@ -2,6 +2,8 @@
 
 将 `mechdog_navigation` 纯算法库（SensorFusion + PathPlanner）封装为 ROS2 节点，作为机械狗巡检的**局部安全层**，与 `quadruped_ws` 全局栈（Nav2 + 激光雷达 + AMCL + 栅格地图 + 安全闸门 + STM32 底盘桥）通过话题对接，构成完整的三库系统。
 
+> **真机状态（2026-09-25）**：已在 Pi 5B（Ubuntu 24.04 + Jazzy + Astra Pro）跑通 —— 深度订阅 ≈30Hz、控制路径端到端 **≈34ms**（不过网络）；上位机/远程接口用 `/safety/terrain_grid`（4848 B/帧 ≈ **0.39 Mbit/s**，2.4GHz 弱网可传）。当前版本 **v2.9.17**。
+
 ## 三库架构总览
 
 | 库 | 位置 | 职责 |
@@ -58,25 +60,25 @@ mechdog_navigation_ros/
 
 - ROS2 (Jazzy / Humble), colcon
 - `mechdog_navigation` 纯算法库源码（与本包**同级目录**，即 `../mechdog_navigation/`）
-- `mechdog_ultrasonic`（本包子包，方案A：超声波消息 + 节点；`colcon build` 先编它）
+- `mechdog_ultrasonic`（本包子包；方案A：超声波消息 + 节点。**构建时须提到 `src/` 同级**——colcon 不发现嵌套包，否则 `find_package(mechdog_ultrasonic)` 失败；提到同级后 `colcon build` 会按依赖先编它）
 - 传感器真机驱动：Astra Pro（Orbbec Astra SDK，真机经 `USE_ASTRA_SDK` 编译）、HC-SR04（主路径：底盘 STM32 捕获经 0x02 帧上报 → 桥节点补丁发布 /ultrasonic；备选：本包 ultrasonic_node 经 libgpiod，Pi 5 用）、环境光强（默认 `estimate_ambient_light()` 深度图代理，TSL2591 已取消购买）
 
 ## 构建 & 运行
 
 ```bash
-# 工作区布局: colcon_ws/src/ 下同时放 mechdog_navigation 和 mechdog_navigation_ros
+# 工作区布局（超声子包必须提到 src/ 同级, 见上"依赖"）:
 #   colcon_ws/src/mechdog_navigation/          # 纯算法库 (上游仓库)
-#   colcon_ws/src/mechdog_navigation_ros/      # 本包 (含 mechdog_ultrasonic 子包)
+#   colcon_ws/src/mechdog_navigation_ros/      # 本包
+#   colcon_ws/src/mechdog_ultrasonic/          # 超声子包（与本包内 mechdog_ultrasonic/ 同源）
 cd ~/colcon_ws
-# 方案A: 先编译超声子包(消息), 再编胶水包
-colcon build --packages-select mechdog_ultrasonic mechdog_navigation_ros
+colcon build                # 按依赖顺序自动先编 mechdog_ultrasonic 再编本包
 source install/setup.bash
 
 # 模拟模式 (无需硬件, PC 直接跑)
 ros2 launch mechdog_navigation_ros safety.launch.py
 
-# 真机模式
-ros2 launch mechdog_navigation_ros safety.launch.py use_simulated:=false
+# 真机模式 (Pi: Astra 驱动节点已在发布 /camera/depth/image_raw, 深度走话题)
+ros2 launch mechdog_navigation_ros safety.launch.py use_simulated:=false depth_source:=topic
 
 # 方案A: 超声波独立节点 (先启动, 再跑 safety_node; 模拟数据可看链路)
 ros2 run mechdog_ultrasonic ultrasonic_node
@@ -91,9 +93,15 @@ ros2 run mechdog_ultrasonic ultrasonic_node
 | `/fusion_result` | std_msgs/String (JSON) | 发布 | 融合结果 JSON（环境/悬崖/前方距离/动作/权重/速度） |
 | `/scan` | sensor_msgs/LaserScan | 订阅 | 雷达（sensor_data QoS, 当前缓存预留, 不参与融合） |
 | `/ultrasonic` | mechdog_ultrasonic/UltrasonicArray | 订阅 | **方案A**: 超声波阵列读数（`ultrasonic_node` 发布; safety_node 订阅后注入算法库, 替代内部 GPIO 直读; 未收到/过期时算法库回退内部读取） |
+| `/camera/depth/image_raw` | sensor_msgs/Image (16UC1) | 订阅 | 深度来源=话题（`depth_source:=topic`，如 Pi 上 Astra 驱动节点）；默认名，`depth_topic` 可改 |
+| `/camera/depth/camera_info` | sensor_msgs/CameraInfo | 订阅 | 深度内参（同来源；`depth_info_topic` 可改） |
 | `/mechdog/point_cloud` | sensor_msgs/PointCloud2 | 发布 | 近场深度点云（`camera_link` 系, `enable_pointcloud:=true` 启用, 默认关） |
 | `/mechdog/negative_obstacles` | sensor_msgs/PointCloud2 | 发布 | **负障碍标记点**（`base_link` 系地面高度处, P1 地面分割检出坑/下行台阶; 跟随 `enable_pointcloud`） |
 | `/mechdog/rgb/image_raw` | sensor_msgs/Image (rgb8) | 发布 | Astra 彩色帧（`enable_rgb:=true` 启用, 默认关；真机出图，默认 10fps，Foxglove bridge 自带压缩） |
+| `/safety/terrain_map` | sensor_msgs/Image (rgb8) | 发布 | 2.5D 地形**渲染图**（宽 404 × 高 192，x4 放大；232704 B/帧 ⇒ 10Hz 约 18.6 Mbit/s——人看/录屏用，弱网勿远程订阅） |
+| `/safety/terrain_grid` | sensor_msgs/Image (mono8) | 发布 | 2.5D 地形**原生网格**（48×101、step=48、`frame_id=base_link`、row-major `idx=r*48+c`；值 0=未知/1=可通行/2=凸起/3=坑/4=过陡；4848 B/帧 ≈ **0.39 Mbit/s** @10Hz——带宽友好，给上位机/远程用） |
+| `/safety/status_text` | std_msgs/String | 发布 | 状态文案（含深度降级/恢复上报；窗口/上位机显示用） |
+| `/safety/depth_small` | sensor_msgs/Image (16UC1) | 发布 | 深度小图（320×240 1/2 抽点，≈153KB/帧；供汇报窗口显示，`publish_depth_small:=false` 关掉省带宽） |
 | `/map` | nav_msgs/OccupancyGrid | 发布 | 占据栅格地图（仅 `mapping_demo_node`，1Hz；`odom_dry_run` 系） |
 
 ## 对接注意
@@ -103,8 +111,39 @@ ros2 run mechdog_ultrasonic ultrasonic_node
 - **ROS2 版本**：本包按 Jazzy（Ubuntu 24.04）写法；若环境是 Humble（22.04），代码无需改，仅构建环境不同。
 - **rgb_stream 安全**：`rgb_stream` 是无鉴权调试服务，绑定 `0.0.0.0`，局域网内任何设备都可查看摄像头画面与距离数据。仅限可信局域网调试使用，不要暴露到公网；如需长期运行建议改绑 `127.0.0.1`（改 `main` 中 `addr.sin_addr.s_addr`）或加反向代理鉴权。
 - **速度仲裁**：当前 safety_node 直接发布自己的规划结果。接入 Nav2 后，建议将 Nav2 输出作为闸门输入的另一个发布者（师兄闸门天然支持多输入），本层仅在检测到悬崖/近距障碍时覆盖输出。
-- **传感器真机化**：当前算法库内部走模拟数据；真机接入时需为 Astra/超声/光强各写 ROS2 驱动节点（或直接改算法库驱动层）。
+- **传感器真机化（2026-09 更新）**：深度已真机 —— Pi 上由 Astra 驱动节点发布 `/camera/depth/image_raw`，本节点 `depth_source:=topic` 订阅（实测 ≈30Hz）；超声仍待（主路径：底盘 STM32 捕获 → 桥节点补丁发 `/ultrasonic`；备选：本包 `ultrasonic_node` GPIO）；光强走深度图代理。
+- **深度质量守门 + 时域上报（v2.9.17）**：守门阈值不变（valid% < 25% 或点数 < 300 判坏帧，fail-closed）；连续 `depth_bad_streak_n`（默认 3）轮拿不到可用深度 ⇒ 日志 + `/safety/status_text` **显式上报**降级（1Hz 刷新），拿到好帧自动解除。**纯观测**：不动阈值与决策。
+- **地面提取（v2.9.16，口径①）**：`cell` 成功时跳过 RANSAC（`cell_skip_ransac:=false` 可回历史行为）；同工装对照平面精度 0.98°/1.39° → **0.02°**，节点日志带 `fit=cell/ransac` 供现场判定。
 - **前向全盲行为（接真机前必读）**：算法库在前向三方向全部失效（镜头被挡 + 三颗前向超声全坏）时输出 `SLOW_FORWARD` 降速盲行（仅 bottom 悬崖兜底），**不是 STOP**。接机械狗前务必与师兄闸门确认该场景有叠加保护；若本层是最后防线，按 mechdog_navigation README「已知限制」#7 把该分支改为 `STOP`。
+
+## 参数一览（safety_node）
+
+`ros2 param set /safety_node <名> <值>` 或 `--ros-args -p <名>:=<值>` 均可改；标 ★ 的另有 launch 透传（`xxx:=值`）。
+
+| 分组 | 参数 | 默认 | 说明 |
+|---|---|---|---|
+| 来源/模式 | `use_simulated`★ | true | true=PC 模拟（无需硬件）；false=真机 |
+| | `depth_source`★ | auto | auto / **topic**（订 ROS 深度话题，Pi 用）/ sdk（Astra SDK 直读）/ simulated |
+| | `depth_topic`★（`depth_info_topic` 同名透传无） | /camera/depth/image_raw | 深度来源=topic 时的话题名 |
+| | `depth_timeout_ms`★ | 500 | 深度帧超时（ms）⇒ 标失效（fail-closed，决策只剩超声） |
+| | `ultrasonic_source`★ | auto | auto / topic / hardware / simulated（仅台架）/ none |
+| | `allow_simulated_ultrasonic`★ | false | 真机模式把模拟超声接进安全链（默认拒绝，防假悬崖） |
+| | `ultrasonic_timeout_ms`★ | 500 | 超声话题超时 ⇒ 超声移出安全链 |
+| | `warmup_ms` | 250 | 启动预热：等底部超声就绪后再跑首轮融合（防首帧假 STOP；有界超时兜底） |
+| 相机几何 / 地面先验 | `cloud_x`★ / `cloud_z`★ | 0.12 / 0.18 | 相机相对 base_link 位置（m，装机量测） |
+| | `cloud_pitch_rad`★ | 节点 0.2618（15°）/ launch 0.0 | 相机俯仰（rad）——launch 默认 0.0 跟随台架实装，装机量测后改 |
+| | `cloud_roll_rad`★ / `cloud_yaw_rad`★ | 0.0 | 安装横滚（竖墙标定，台架实测 -0.041）/ 安装偏航（装夹对齐机体后保持 0） |
+| | `camera_height_m`★ | -1.0 | >0 时推导地面先验 = −(h − camera_z)；-1=用仓库默认 |
+| | `ground_prior_z`★ / `ground_prior_window`★ | -999.0 / -1.0 | 先验高度直给（优先于推导）；先验半带宽（≤0 用默认 0.10，>0.25 告警勿放宽） |
+| 地面提取 | `ground_fit_method`★ | ransac | ransac（默认）/ cell（确定性格最小拟合） |
+| | `cell_skip_ransac`★ | true | cell 成功时跳过 RANSAC（v2.9.16 口径①；false=历史行为） |
+| 深度守门 | `depth_bad_streak_n`★ | 3 | 连续 N 轮坏 ⇒ 降级并在 `/safety/status_text` 显式上报（v2.9.17） |
+| 发布开关 | `enable_pointcloud`★ | false | 发 `/mechdog/point_cloud` + `/mechdog/negative_obstacles` |
+| | `cloud_topic` / `cloud_frame` / `cloud_downsample_step` | /mechdog/point_cloud / camera_link / 8 | 点云话题名 / 坐标系 / 降采样步长（每 N 点取 1） |
+| | `negative_topic` / `grid_wedge_only` | /mechdog/negative_obstacles / true | 负障碍话题名 / 视场楔形口径（仅统计） |
+| | `enable_rgb`★ / `rgb_topic` / `rgb_frame` / `rgb_fps` | false / /mechdog/rgb/image_raw / camera_link / 10 | RGB 回传开关与话题/坐标系/帧率 |
+| | `publish_depth_small`★ | true | 发 `/safety/depth_small`（供汇报窗口；关掉省带宽） |
+| 其它 | `cmd_vel_topic`★ | /unsafe/cmd_vel | 速度指令发布话题（直连 /cmd_vel 仅测试） |
 
 ## 近场点云（P3 起步）
 
@@ -144,7 +183,7 @@ voxel_layer:
 
 **注意**：
 
-- **相机单进程独占**：safety_node 内部直接开 Astra（`use_simulated:=false` 时），不要再起第二个读相机的节点/程序，否则后开者 serial 为空、深度全失效（真机实测过）。点云跟着融合线程走正是为此。
+- **相机单进程独占**：`depth_source:=sdk` 时 safety_node 自己开 Astra——不要再起第二个读相机的节点/程序，否则后开者 serial 为空、深度全失效（真机实测过）；`depth_source:=topic` 时由外部 Astra 节点独占相机，本节点只订阅。点云跟着融合线程走正是为此。
 - voxel_layer 标的是"有点的位置"：桌沿、立体障碍、**悬崖边缘唇口**都能标；整片"该有地面而没有"的负障碍（坑/下行楼梯）由 **P1 地面分割**输出到 `/mechdog/negative_obstacles`。
 
 ### 负障碍检测（P1）
@@ -253,6 +292,11 @@ sudo ros2 run mechdog_ultrasonic ultrasonic_node \
 | `mechdog_ultrasonic/msg/UltrasonicArray.msg` | 4 颗超声读数(cm) + 有效性标记 + 时间戳 + seq |
 | `mechdog_ultrasonic/src/ultrasonic_node.cpp` | 读 GPIO(USE_GPIO)/模拟 → 发布 /ultrasonic；引脚/频率 ROS 参数可配 |
 
+## 汇报与调试工具（tools/）
+
+Pi 上真机运行/汇报用的一组脚本（实时窗口、抓帧取证、离线回放、A/B 对照）——清单与用法见 **`tools/README.md`**。
+窗口消费 `/safety/terrain_map`（渲染图）与 `/safety/depth_small`（深度小图）；A/B 脚本为 `tools/pi_window_ab.sh`。
+
 ## 状态
 
 - [x] 包骨架 + safety_node 模拟模式
@@ -260,8 +304,13 @@ sudo ros2 run mechdog_ultrasonic ultrasonic_node \
 - [x] 对接闸门（/unsafe/cmd_vel + sensor_data QoS）
 - [x] 建图端到端演示（mapping_demo_node：dry_run odom + 合成深度 → /map + PGM，几何点级校验通过）
 - [x] 超声波独立节点（方案A：mechdog_ultrasonic 子包，模拟跑通 + safety_node 订阅注入；`is_fall_risk` 已改注入优先口径 + 单测）
-- [ ] ROS2 版本确认
-- [ ] 真机传感器节点（Astra SDK 深度，真机化；HC-SR04 实机数据 = STM32 0x02 上报经桥节点补丁 → /ultrasonic，**待师兄固件+桥补丁落地**）
+- [x] ROS2 版本确认（Pi 5B：Ubuntu 24.04 + Jazzy，真机跑通）
+- [x] 深度真机化（Astra 驱动节点发 /camera/depth/image_raw → `depth_source:=topic`，实测 ≈30Hz；控制路径端到端 ≈34ms）
+- [x] 2.5D 地形接口（`/safety/terrain_map` 渲染 + `/safety/terrain_grid` 紧凑网格 + `/safety/status_text`；grid ≈0.39 Mbit/s 供上位机）
+- [x] 深度守门时域上报（v2.9.17：连续坏帧 ⇒ 降级显式上报，纯观测）
+- [x] 地面提取双路径 + cell 跳过 RANSAC（v2.9.16：精度 0.98°/1.39° → 0.02°）
+- [x] 汇报窗口工具（tools/：实时窗口 + 抓帧/回放 + A/B 脚本）
+- [ ] 真机超声波（HC-SR04 实机数据 = STM32 0x02 上报经桥节点补丁 → /ultrasonic，**待师兄固件+桥补丁落地**；备选本包 GPIO 路径）
 - [ ] Stm32ChassisBridge 串口实机联调（协议已实现, 待硬件验证）
 - [ ] 建图真机化（Astra 真深度替换合成帧 + 真底盘 odom 位姿；Windows 侧静止/旋转扫描已由算法库 `tools/mapping_real_test` 验证）
 - [ ] 真机部署前：确认前向全盲 `SLOW_FORWARD` 策略与全局闸门的兜底关系（mechdog_navigation README「已知限制」#7）
