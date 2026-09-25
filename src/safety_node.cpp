@@ -151,6 +151,12 @@ public:
         //   置 false 回到旧行为(供真机 A/B / 排查)。
         this->declare_parameter("cell_skip_ransac", true);
         gseg_params_.cell_skip_ransac = this->get_parameter("cell_skip_ransac").as_bool();
+        // v2.9.17 (2026-09-25 师兄口径 ②, **仅观测不判定**): 深度可用性"时域"判据 ——
+        //   连续 N 轮拿不到可用深度(无帧 / 质量守门 / 点云为空) ⇒ 标记"深度降级"并在日志与
+        //   /safety/status_text 显式上报; 拿到好帧后自动解除。
+        //   阈值(25%/300)与决策行为(fail-closed / 路1 abstain)一律不变 —— 把"静默"变"显式"。
+        this->declare_parameter("depth_bad_streak_n", 3);
+        depth_bad_streak_n_ = static_cast<int>(this->get_parameter("depth_bad_streak_n").as_int());
         const double prior_override = this->declare_parameter("ground_prior_z", -999.0);
 
         cloud_E_.x     = cloud_x_;
@@ -567,6 +573,59 @@ private:
         }
     }
 
+    // v2.9.17 (口径 ②): 降级时**主动**发一条状态文案 —— 坏帧走早退路径, 否则窗口永远显示
+    //   最后一次"好"文案(现场看起来一切正常), 正是要消灭的"静默"。
+    void publish_depth_degraded_status(const char* why) {
+        if (!status_text_pub_)
+            status_text_pub_ = this->create_publisher<std_msgs::msg::String>("/safety/status_text", 1);
+        std_msgs::msg::String s;
+        char b[256];
+        std::snprintf(b, sizeof(b),
+            "DEPTH DEGRADED: 连续 %d 轮无可用深度 (%.1fs, 最近原因=%s) -- 本轮不注入地形(fail-closed); "
+            "查相机/USB/光照, 非安装角",
+            depth_bad_streak_, this->now().seconds() - depth_bad_t0_, why);
+        s.data = b;
+        status_text_pub_->publish(s);
+    }
+
+    // v2.9.17 (口径 ②, 仅观测): 记录"本轮拿不到可用深度"。不改变任何判定/阈值/决策行为。
+    void note_depth_bad(int reason) {   // 0=无帧 1=质量守门 2=点云为空
+        if (!depth_ever_good_) return;  // 启动期(还没见过好帧)不计, 避免噪声
+        depth_last_reason_ = reason;
+        if (depth_bad_streak_ == 0) depth_bad_t0_ = this->now().seconds();
+        ++depth_bad_streak_;
+        const char* why = (reason == 0) ? "no frame" : (reason == 2) ? "empty cloud" : "quality gate";
+        if (depth_bad_streak_ == std::max(1, depth_bad_streak_n_) && !depth_degraded_) {
+            depth_degraded_ = true;
+            RCLCPP_WARN(this->get_logger(),
+                "深度降级: 连续 %d 轮拿不到可用深度 (%.2fs, 最近原因=%s) ⇒ 路1/2.5D 持续 abstain (与单帧同口径, 行为不变); "
+                "排查方向 = 相机/USB/光照, 不是安装角。好帧自动解除 (参数 depth_bad_streak_n=%d)",
+                depth_bad_streak_, this->now().seconds() - depth_bad_t0_, why, depth_bad_streak_n_);
+        }
+        if (depth_degraded_) {
+            // 降级期间每轮刷新一次(1Hz 节流), 保证窗口里看到的就是"当前"状态
+            const double now_s = this->now().seconds();
+            if (now_s - last_degraded_status_s_ >= 1.0) {
+                last_degraded_status_s_ = now_s;
+                publish_depth_degraded_status(why);
+            }
+        }
+    }
+    void note_depth_good() {
+        depth_ever_good_ = true;
+        if (depth_bad_streak_ == 0) return;
+        const double dt = this->now().seconds() - depth_bad_t0_;
+        if (depth_degraded_) {
+            RCLCPP_WARN(this->get_logger(),
+                "深度恢复: 此前连续 %d 轮不可用 (%.2fs) ⇒ 降级解除", depth_bad_streak_, dt);
+        } else {
+            RCLCPP_INFO_THROTTLE(this->get_logger(), *this->get_clock(), 5000,
+                "深度瞬时坏帧已恢复 (连续 %d 轮, 未达降级阈值 %d)", depth_bad_streak_, depth_bad_streak_n_);
+        }
+        depth_bad_streak_ = 0;
+        depth_degraded_   = false;
+    }
+
     // 近场感知更新 (每轮融合节拍调用, **与是否发布点云解耦**):
     //   depth → cloud(optical→link) → 下采样 → base 系 → 地面分割(P1) → 2.5D(P1.5)
     //   → 路1: fusion_->set_local_terrain(hm, seg)  近场走廊有坑/台阶 → STOP / 降速让开
@@ -581,6 +640,7 @@ private:
         if (!frame.valid || frame.depth_map.empty() ||
             frame.depth_width <= 0 || frame.depth_height <= 0) {
             fusion_->clear_local_terrain();   // 无帧 → 不注入地形 (行为回到接入路1之前)
+            note_depth_bad(0);   // v2.9.17 口径②: 计入"连续坏帧"
             return;  // 首帧未就绪 / 真机帧失效 (H1 同口径)
         }
         // v2.9.3 深度质量守门 (方案 §4.3): 坏数据比没数据更危险 —— 实机事故中深度全 0 帧
@@ -604,6 +664,7 @@ private:
                 depth_gate_vr_  = vr;
                 depth_gate_px_  = dv;
                 fusion_->clear_local_terrain();   // 未就绪 ⇒ 路1 不表态 (行为回到接入路1之前)
+                note_depth_bad(1);   // v2.9.17 口径②
                 return;
             }
         }
@@ -626,6 +687,7 @@ private:
         if (cloud_ds_opt.points.empty()) {
             depth_gate_hit_ = true;   // v2.9.12: 全无效深度 ⇒ 数据坏, 非构图问题
             fusion_->clear_local_terrain();
+            note_depth_bad(2);   // v2.9.17 口径②
             return;  // 全无效深度
         }
 
@@ -655,6 +717,7 @@ private:
         const auto tS5 = std::chrono::steady_clock::now();
         ms_heightmap_ = std::chrono::duration<double, std::milli>(tS5 - tS4).count();
         fusion_->set_local_terrain(hm, seg_);
+        note_depth_good();   // v2.9.17 口径②: 本轮拿到可用深度
 
         // ---- v2.8.2 汇报用可视化: 发布 2.5D 可行度图 + 状态文本 ----
         //   (画面上的可行度图 = 节点真实决策依据, 不是事后重算, 汇报口径最硬)
@@ -675,9 +738,10 @@ private:
             : static_cast<int>(2.0 * hcfg.y_half_m / hcfg.cell_size) + 1;
         if (cols > 0 && rows > 0) {
             static rclcpp::Publisher<sensor_msgs::msg::Image>::SharedPtr tpub;
-            static rclcpp::Publisher<std_msgs::msg::String>::SharedPtr spub;
             if (!tpub) tpub = this->create_publisher<sensor_msgs::msg::Image>("/safety/terrain_map", 1);
-            if (!spub) spub = this->create_publisher<std_msgs::msg::String>("/safety/status_text", 1);
+            if (!status_text_pub_)   // v2.9.17: 改为成员 —— 降级时(早退路径)也要能主动发文案
+                status_text_pub_ = this->create_publisher<std_msgs::msg::String>("/safety/status_text", 1);
+            auto& spub = status_text_pub_;
             static rclcpp::Publisher<sensor_msgs::msg::Image>::SharedPtr grpub;
             if (!grpub) grpub = this->create_publisher<sensor_msgs::msg::Image>("/safety/terrain_grid", 1);
             const int sc = 4;                       // 放大倍数
@@ -765,6 +829,13 @@ private:
                     hm.count_in_fov, cols * rows, hm.fov_coverage() * 100.0);
             }
             s.data = buf;
+            if (depth_degraded_) {   // v2.9.17 (口径②): 把"连续坏帧"显式写进状态文本
+                char d2[192];
+                std::snprintf(d2, sizeof(d2),
+                    "  |  DEPTH DEGRADED: 连续 %d 轮无可用深度 (%.1fs) -- 查相机/USB/光照, 非安装角",
+                    depth_bad_streak_, this->now().seconds() - depth_bad_t0_);
+                s.data += d2;
+            }
             spub->publish(s);
         }
 
@@ -1014,6 +1085,15 @@ private:
     // v2.9.12 可诊断性: 区分"真没地面"与"深度坏帧被守门拦下" —— 此前两者共用同一句
     // "NO PLANE ... (pitch camera down onto open floor)", 现场会误导 (明明对着地面却被告知朝下压)
     bool    depth_gate_hit_  = false;
+    // v2.9.17 (口径 ②, 仅观测): 深度可用性"时域"记录
+    int     depth_bad_streak_n_ = 3;      // 连续 N 轮无可用深度 ⇒ 降级 (参数 depth_bad_streak_n)
+    int     depth_bad_streak_   = 0;      // 当前连续坏帧轮数 (好帧清零)
+    double  depth_bad_t0_       = 0.0;    // 本段坏帧起始时刻 (秒)
+    bool    depth_degraded_     = false;  // 是否已上报"降级"
+    bool    depth_ever_good_    = false;  // 见过好帧后才计数 (避免启动噪声)
+    int     depth_last_reason_  = -1;     // 最近一次原因: 0=无帧 1=质量守门 2=点云为空
+    double  last_degraded_status_s_ = -1e9;  // 上次主动发降级文案的时刻 (1Hz 节流)
+    rclcpp::Publisher<std_msgs::msg::String>::SharedPtr status_text_pub_;   // 懒创建
     double  depth_gate_vr_   = 0.0;   // 本轮的深度有效率
     size_t  depth_gate_px_   = 0;     // 本轮的有效像素数
     double cloud_pitch_rad_ = 0.2617994; // 15°
