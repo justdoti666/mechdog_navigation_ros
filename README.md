@@ -155,7 +155,7 @@ ros2 launch mechdog_navigation_ros safety.launch.py enable_pointcloud:=true
 
 - 点云链路：深度图 → `depth_to_cloud` 反投影（0.6~8.0m 有效口径）→ `transform_optical_to_link` 固定旋转 → 每 N 点取 1 降采样 → 发布 `PointCloud2`（`enable_pointcloud` 默认 `false`，开启后行为不变只多一点云）
 - 发布频率跟随融合节拍（真机 ~9-12Hz），话题 `/mechdog/point_cloud`，坐标系 `camera_link`（REP-103：X 前 Y 左 Z 上）
-- launch 会同时启动 `static_transform_publisher`（`base_link → camera_link`，默认外参 x=0.12 / z=0.18 / pitch=+15°，**装机标定后用 `camera_x/camera_z/camera_pitch_rad` 覆盖**）
+- launch 会同时启动 `static_transform_publisher`（`base_link → camera_link`，默认外参 x=0.12 / z=0.18 / pitch=0.0（v2.9.4 起跟随实际装配；机械按 15° 规格装好后改 `camera_pitch_rad=0.2618`，改前用安装角自检确认 tilt<2°），**装机标定后用 `camera_x/camera_z/camera_pitch_rad` 覆盖**）
 - 参数：`cloud_topic` / `cloud_frame` / `cloud_downsample_step`（默认 8，Pi 上算力紧可加大）
 
 **师兄 Nav2 接入**（local_costmap 加一个 voxel 层即可消费）：
