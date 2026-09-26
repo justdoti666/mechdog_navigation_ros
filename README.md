@@ -2,7 +2,7 @@
 
 将 `mechdog_navigation` 纯算法库（SensorFusion + PathPlanner）封装为 ROS2 节点，作为机械狗巡检的**局部安全层**，与 `quadruped_ws` 全局栈（Nav2 + 激光雷达 + AMCL + 栅格地图 + 安全闸门 + STM32 底盘桥）通过话题对接，构成完整的三库系统。
 
-> **真机状态（2026-09-25）**：已在 Pi 5B（Ubuntu 24.04 + Jazzy + Astra Pro）跑通 —— 深度订阅 ≈30Hz、控制路径端到端 **≈34ms**（不过网络；证据 `docs/PERF_TIMING_EVIDENCE.md`）；上位机/远程接口用 `/safety/terrain_grid`（4848 B/帧 ≈ **0.39 Mbit/s**，2.4GHz 弱网可传）。当前版本 **v2.9.17**。
+> **真机状态（2026-09-25）**：已在 Pi 5B（Ubuntu 24.04 + Jazzy + Astra Pro）跑通 —— 深度订阅 ≈30Hz、控制路径端到端 **≈34ms**（不过网络；证据 `docs/PERF_TIMING_EVIDENCE.md`）；上位机/远程接口用 `/safety/terrain_grid`（4848 B/帧 ≈ **0.39 Mbit/s**，2.4GHz 弱网可传）。当前版本 **v2.9.20**。
 
 ## 三库架构总览
 
@@ -114,9 +114,10 @@ ros2 run mechdog_ultrasonic ultrasonic_node
 - **传感器真机化（2026-09 更新）**：深度已真机 —— Pi 上由 Astra 驱动节点发布 `/camera/depth/image_raw`，本节点 `depth_source:=topic` 订阅（实测 ≈30Hz）；超声仍待（主路径：底盘 STM32 捕获 → 桥节点补丁发 `/ultrasonic`；备选：本包 `ultrasonic_node` GPIO）；光强走深度图代理。
 - **深度质量守门 + 时域上报（v2.9.17）**：守门阈值不变（valid% < 25% 或点数 < 300 判坏帧，fail-closed）；连续 `depth_bad_streak_n`（默认 3）轮拿不到可用深度 ⇒ 日志 + `/safety/status_text` **显式上报**降级（1Hz 刷新），拿到好帧自动解除。**纯观测**：不动阈值与决策。
 - **地面提取（v2.9.16，口径①）**：`cell` 成功时跳过 RANSAC（`cell_skip_ransac:=false` 可回历史行为）；同工装对照平面精度 0.98°/1.39° → **0.02°**，节点日志带 `fit=cell/ransac` 供现场判定。
+- **退化期降级链（v2.9.20，S1/N2）**：连续坏帧达阈值 ⇒ 降级期间 **前进限速≤SLOW + 三级反应线收紧**（10/25/50 → 20/40/70cm，超声与融合两套阶梯同口径）；好帧自动解除。`degraded_policy:=false` 回 v2.9.19 纯上报行为（供 A/B）；数值为初始保守提案，待长跑误报率数据 + 会签定稿（单帧阈值与 fail-closed 口径不变）。
 - **前向全盲行为（接真机前必读）**：算法库在前向三方向全部失效（镜头被挡 + 三颗前向超声全坏）时输出 `SLOW_FORWARD` 降速盲行（仅 bottom 悬崖兜底），**不是 STOP**。接机械狗前务必与师兄闸门确认该场景有叠加保护；若本层是最后防线，按 mechdog_navigation README「已知限制」#7 把该分支改为 `STOP`。
 
-## 参数一览（safety_node，共 32 个）
+## 参数一览（safety_node，共 33 个）
 
 `ros2 param set /safety_node <名> <值>` 或 `--ros-args -p <名>:=<值>` 均可改；标 ★ 的另有 launch 透传（`xxx:=值`）。
 
@@ -138,6 +139,7 @@ ros2 run mechdog_ultrasonic ultrasonic_node
 | 地面提取 | `ground_fit_method`★ | ransac | ransac（默认）/ cell（确定性格最小拟合） |
 | | `cell_skip_ransac`★ | true | cell 成功时跳过 RANSAC（v2.9.16 口径①；false=历史行为） |
 | 深度守门 | `depth_bad_streak_n`★ | 3 | 连续 N 轮坏 ⇒ 降级并在 `/safety/status_text` 显式上报（v2.9.17） |
+| | `degraded_policy`★ | true | v2.9.20 (S1/N2) 降级期：前进限速≤SLOW + 反应线 20/40/70cm；false=仅上报（回 v2.9.19） |
 | 发布开关 | `enable_pointcloud`★ | false | 发 `/mechdog/point_cloud` + `/mechdog/negative_obstacles` |
 | | `cloud_topic` / `cloud_frame` / `cloud_downsample_step` | /mechdog/point_cloud / camera_link / 8 | 点云话题名 / 坐标系 / 降采样步长（每 N 点取 1） |
 | | `negative_topic` / `grid_wedge_only` | /mechdog/negative_obstacles / true | 负障碍话题名 / 视场楔形口径（仅统计） |
@@ -310,6 +312,7 @@ Pi 上真机运行/汇报用的一组脚本（实时窗口、抓帧取证、离�
 - [x] 深度守门时域上报（v2.9.17：连续坏帧 ⇒ 降级显式上报，纯观测）
 - [x] 稳健性修复批（v2.9.18）：启动期深度全坏可告警〔N9〕/ `msg->step` 行步长拷贝〔B10〕/ 模拟模式地形守门生效〔N7〕/ TF roll·yaw 与算法侧同源〔B2〕
 - [x] v2.9.19：超声启动门——topic 首帧到达前不接入安全链〔B4〕；STOP/REACHED_GOAL 直达零速〔A2，算法库同源〕
+- [x] 退化期降级链（v2.9.20 S1/N2：限速≤SLOW + 反应线 20/40/70cm，`degraded_policy` 可关；本地验证 + 运行时两相位实测，未上真机）
 - [x] 地面提取双路径 + cell 跳过 RANSAC（v2.9.16：精度 0.98°/1.39° → 0.02°）
 - [x] 汇报窗口工具（tools/：实时窗口 + 抓帧/回放 + A/B 脚本）
 - [ ] 真机超声波（HC-SR04 实机数据 = STM32 0x02 上报经桥节点补丁 → /ultrasonic，**待师兄固件+桥补丁落地**；备选本包 GPIO 路径）
