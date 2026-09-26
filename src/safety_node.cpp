@@ -156,10 +156,12 @@ public:
             RCLCPP_INFO(this->get_logger(),
                 "cell_skip_ransac=true 但 ground_fit_method≠cell ⇒ 该开关不生效 (cell 未启用)");
         }
-        // v2.9.17 (2026-09-25 师兄口径 ②, **仅观测不判定**): 深度可用性"时域"判据 ——
+        // v2.9.17 (2026-09-25 师兄口径 ②): 深度可用性"时域"判据 ——
         //   连续 N 轮拿不到可用深度(无帧 / 质量守门 / 点云为空) ⇒ 标记"深度降级"并在日志与
         //   /safety/status_text 显式上报; 拿到好帧后自动解除。
-        //   阈值(25%/300)与决策行为(fail-closed / 路1 abstain)一律不变 —— 把"静默"变"显式"。
+        //   单帧阈值(25%/300)与 fail-closed / 路1 abstain 口径一律不变;
+        //   v2.9.20 (S1, N2): 降级期间追加动作层兜底 —— 前进限速≤SLOW + 三级反应线收紧
+        //   (10/25/50 → 20/40/70cm), 由 degraded_policy 开关 (默认 true; 数值待会签)。
         this->declare_parameter("depth_bad_streak_n", 3);
         {
             // v2.9.18 (N8): 护栏 —— <1 时按 1 处理并告警 (否则"首个坏帧即上报"与原意不符)
@@ -170,6 +172,12 @@ public:
             }
             depth_bad_streak_n_ = std::max(1, streak_raw);
         }
+        // v2.9.20 (S1, N2): 降级链开关 —— true: 降级期"前进限速≤SLOW + 反应线 20/40/70cm";
+        //   false: 回 v2.9.19 "仅上报"旧行为 (供真机 A/B 与师兄口径复核)。
+        degraded_policy_ = this->declare_parameter("degraded_policy", true);
+        RCLCPP_INFO(this->get_logger(),
+            "退化期降级链(S1): %s (前进限速≤SLOW / 阈值20-40-70cm; degraded_policy:=false 关闭)",
+            degraded_policy_ ? "启用" : "关闭(仅上报)");
         const double prior_override = this->declare_parameter("ground_prior_z", -999.0);
 
         cloud_E_.x     = cloud_x_;
@@ -645,17 +653,19 @@ private:
         char b[256];
         std::snprintf(b, sizeof(b),
             "DEPTH DEGRADED: 连续 %d 轮无可用深度 (%.1fs, 最近原因=%s) -- 本轮不注入地形(fail-closed); "
-            "查相机/USB/光照, 非安装角",
-            depth_bad_streak_, this->now().seconds() - depth_bad_t0_, why);
+            "查相机/USB/光照, 非安装角%s",
+            depth_bad_streak_, this->now().seconds() - depth_bad_t0_, why,
+            degraded_policy_ ? " | 降级链:限速+阈值20-40-70cm" : "");
         s.data = b;
         status_text_pub_->publish(s);
     }
 
-    // v2.9.17 (口径 ②, 仅观测): 记录"本轮拿不到可用深度"。不改变任何判定/阈值/决策行为。
+    // v2.9.17 (口径 ②) / v2.9.20 (S1, N2): 记录"本轮拿不到可用深度"。
+    //   单帧阈值与 fail-closed 口径不变; 达阈值后按 degraded_policy 启用降级链 (限速/阈值收紧) 或仅上报。
     void note_depth_bad(int reason) {   // 0=无帧 1=质量守门 2=点云为空
         // v2.9.18 (N9): 启动期(从未见过好帧)也计入 —— "相机没插/USB 没起/驱动失败"恰是最
         //   需要告警的场景; 旧版这里直接 return, 把它整个排除了。防启动瞬态误报: 未见过好帧
-        //   时首次升级门槛提高为 max(30, depth_bad_streak_n_) 轮(≈3s@10Hz)。仅观测, 不改判定。
+        //   时首次升级门槛提高为 max(30, depth_bad_streak_n_) 轮(≈3s@10Hz)。不改单帧判定。
         depth_last_reason_ = reason;
         if (depth_bad_streak_ == 0) depth_bad_t0_ = this->now().seconds();
         ++depth_bad_streak_;
@@ -665,16 +675,22 @@ private:
         const char* why = (reason == 0) ? "no frame" : (reason == 2) ? "empty cloud" : "quality gate";
         if (depth_bad_streak_ == eff_n && !depth_degraded_) {
             depth_degraded_ = true;
+            // v2.9.20 (S1, N2): 降级链生效 —— 上行"前进限速≤SLOW + 三级反应线收紧"
+            //   (degraded_policy:=false 时仅上报, 行为与 v2.9.19 一致)。
+            if (degraded_policy_) fusion_->set_depth_degraded(true);
+            const char* chain = degraded_policy_
+                ? "降级链已启用 (前进限速≤SLOW / 阈值20-40-70cm)"
+                : "降级链未启用 (degraded_policy:=false, 仅上报)";
             if (!depth_ever_good_) {
                 RCLCPP_WARN(this->get_logger(),
                     "深度降级(启动期): 启动以来连续 %d 轮拿不到可用深度 (%.2fs, 最近原因=%s) —— "
-                    "疑似相机/USB/驱动未就绪 (或镜头盖未摘); \"从未见过好帧\"不是正常状态",
-                    depth_bad_streak_, this->now().seconds() - depth_bad_t0_, why);
+                    "疑似相机/USB/驱动未就绪 (或镜头盖未摘); \"从未见过好帧\"不是正常状态; %s",
+                    depth_bad_streak_, this->now().seconds() - depth_bad_t0_, why, chain);
             } else {
                 RCLCPP_WARN(this->get_logger(),
-                    "深度降级: 连续 %d 轮拿不到可用深度 (%.2fs, 最近原因=%s) ⇒ 路1/2.5D 持续 abstain (与单帧同口径, 行为不变); "
+                    "深度降级: 连续 %d 轮拿不到可用深度 (%.2fs, 最近原因=%s) ⇒ 路1/2.5D 持续 abstain; %s; "
                     "排查方向 = 相机/USB/光照, 不是安装角。好帧自动解除 (参数 depth_bad_streak_n=%d)",
-                    depth_bad_streak_, this->now().seconds() - depth_bad_t0_, why, depth_bad_streak_n_);
+                    depth_bad_streak_, this->now().seconds() - depth_bad_t0_, why, chain, depth_bad_streak_n_);
             }
         }
         if (depth_degraded_) {
@@ -692,8 +708,10 @@ private:
         if (depth_bad_streak_ == 0) return;
         const double dt = this->now().seconds() - depth_bad_t0_;
         if (depth_degraded_) {
+            if (degraded_policy_) fusion_->set_depth_degraded(false);   // S1: 降级解除, 限速/阈值复原
             RCLCPP_WARN(this->get_logger(),
-                "深度恢复: 此前连续 %d 轮不可用 (%.2fs) ⇒ 降级解除", depth_bad_streak_, dt);
+                "深度恢复: 此前连续 %d 轮不可用 (%.2fs) ⇒ 降级解除%s", depth_bad_streak_, dt,
+                degraded_policy_ ? ", 限速/阈值复原" : "");
         } else if (first_ever) {
             RCLCPP_INFO(this->get_logger(),
                 "深度流就绪: 启动期 %d 轮无可用深度 (%.2fs) 后拿到首帧", depth_bad_streak_, dt);
@@ -908,11 +926,12 @@ private:
                     hm.count_in_fov, cols * rows, hm.fov_coverage() * 100.0);
             }
             s.data = buf;
-            if (depth_degraded_) {   // v2.9.17 (口径②): 把"连续坏帧"显式写进状态文本
-                char d2[192];
+            if (depth_degraded_) {   // v2.9.17 (口径②) / v2.9.20 (S1): "连续坏帧"+降级链 显式写进状态文本
+                char d2[224];
                 std::snprintf(d2, sizeof(d2),
-                    "  |  DEPTH DEGRADED: 连续 %d 轮无可用深度 (%.1fs) -- 查相机/USB/光照, 非安装角",
-                    depth_bad_streak_, this->now().seconds() - depth_bad_t0_);
+                    "  |  DEPTH DEGRADED: 连续 %d 轮无可用深度 (%.1fs) -- 查相机/USB/光照, 非安装角%s",
+                    depth_bad_streak_, this->now().seconds() - depth_bad_t0_,
+                    degraded_policy_ ? " | 降级链:限速+阈值20-40-70cm" : "");
                 s.data += d2;
             }
             spub->publish(s);
@@ -1088,13 +1107,13 @@ private:
             size_t scan_n;
             { std::lock_guard<std::mutex> lk(scan_mutex_); scan_n = scan_ranges_.size(); }
             RCLCPP_INFO(this->get_logger(),
-                "env=%s cliff=%s min_fwd=%.2fm action=%s vel=(%.2f, %.2f) scan=%zu",
+                "env=%s cliff=%s min_fwd=%.2fm action=%s vel=(%.2f, %.2f) scan=%zu degraded=%s",
                 env_to_str(result.environment),
                 result.cliff_detected ? "YES" : "no",
                 result.min_forward_distance_m,
                 action_to_str(result.recommended_action),  // ROS-6 v2.2: 枚举改字符串名
                 cmd.linear, cmd.angular,
-                scan_n);
+                scan_n, result.depth_degraded ? "YES" : "no");
         }
     }
 
@@ -1164,7 +1183,7 @@ private:
     // v2.9.12 可诊断性: 区分"真没地面"与"深度坏帧被守门拦下" —— 此前两者共用同一句
     // "NO PLANE ... (pitch camera down onto open floor)", 现场会误导 (明明对着地面却被告知朝下压)
     bool    depth_gate_hit_  = false;
-    // v2.9.17 (口径 ②, 仅观测): 深度可用性"时域"记录
+    // v2.9.17 (口径 ②) + v2.9.20 (S1, N2): 深度可用性"时域"记录 与 降级链开关
     int     depth_bad_streak_n_ = 3;      // 连续 N 轮无可用深度 ⇒ 降级 (参数 depth_bad_streak_n)
     int     depth_bad_streak_   = 0;      // 当前连续坏帧轮数 (好帧清零)
     double  depth_bad_t0_       = 0.0;    // 本段坏帧起始时刻 (秒)
@@ -1172,6 +1191,8 @@ private:
     bool    depth_ever_good_    = false;  // 是否见过好帧 (v2.9.18 N9: 启动期也计数, 仅门槛提高)
     int     depth_last_reason_  = -1;     // 最近一次原因: 0=无帧 1=质量守门 2=点云为空
     double  last_degraded_status_s_ = -1e9;  // 上次主动发降级文案的时刻 (1Hz 节流)
+    // v2.9.20 (S1, N2): 降级链开关 (参数 degraded_policy; true = 降级期"前进限速≤SLOW + 反应线 20/40/70cm")
+    bool    degraded_policy_    = true;
     rclcpp::Publisher<std_msgs::msg::String>::SharedPtr status_text_pub_;   // v2.9.18: 构造期已创建
     double  depth_gate_vr_   = 0.0;   // 本轮的深度有效率
     size_t  depth_gate_px_   = 0;     // 本轮的有效像素数
@@ -1247,6 +1268,7 @@ private:
             << "{\"timestamp\":" << r.timestamp
             << ",\"environment\":\"" << env_to_str(r.environment) << "\""
             << ",\"cliff\":" << (r.cliff_detected ? "true" : "false")
+            << ",\"degraded\":" << (r.depth_degraded ? "true" : "false")
             << ",\"min_fwd_m\":" << r.min_forward_distance_m
             << ",\"action\":\"" << action_to_str(r.recommended_action) << "\""
             << ",\"astra_w\":" << r.effective_astra_weight

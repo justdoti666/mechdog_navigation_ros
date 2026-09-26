@@ -102,6 +102,9 @@ def generate_launch_description():
             'depth_bad_streak_n', default_value='3',
             description='v2.9.17 深度守门时域: 连续 N 轮拿不到可用深度 ⇒ 降级并向 /safety/status_text 显式上报'),
         DeclareLaunchArgument(
+            'degraded_policy', default_value='true',
+            description='v2.9.20 (S1,N2) 退化期降级链: 降级期间前进限速≤SLOW + 反应线 20/40/70cm; false=仅上报(回 v2.9.19 行为)'),
+        DeclareLaunchArgument(
             'publish_depth_small', default_value='true',
             description='v2.9.15 发布 /safety/depth_small (16UC1 320x240, 供汇报窗口; 关掉可省带宽)'),
         Node(
@@ -132,6 +135,7 @@ def generate_launch_description():
                 'ground_fit_method': LaunchConfiguration('ground_fit_method'),
                 'cell_skip_ransac': LaunchConfiguration('cell_skip_ransac'),
                 'depth_bad_streak_n': LaunchConfiguration('depth_bad_streak_n'),
+                'degraded_policy': LaunchConfiguration('degraded_policy'),
                 'publish_depth_small': LaunchConfiguration('publish_depth_small'),
             }],
         ),
