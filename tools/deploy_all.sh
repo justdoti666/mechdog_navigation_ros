@@ -6,16 +6,18 @@ CORE_SRC=/c/Users/老w/Documents/dsh/mechdog_navigation
 CORE_DST=/home/chj/mdw_ws/src/mechdog_navigation
 
 echo "=== 0) 核心改动清单 (本地 vs Pi, md5) ==="
+# v2.9.20: 含 path_planner.cpp —— S1 限速件; 曾漏同步 ⇒ Pi 重建会缺"降级限速"(半套 S1)
 for f in heightmap_2d5.h heightmap_2d5.cpp ground_segmentation.h ground_segmentation.cpp \
-         sensor_fusion.h sensor_fusion.cpp sensor_astra.cpp config.h; do
+         sensor_fusion.h sensor_fusion.cpp path_planner.cpp sensor_astra.cpp config.h; do
   L=$(md5sum "$CORE_SRC/$f" | cut -c1-8)
   R=$(timeout 60 ssh -o ConnectTimeout=25 -o StrictHostKeyChecking=no -i $K $H "md5sum $CORE_DST/$f 2>/dev/null | cut -c1-8")
   [ "$L" = "$R" ] && echo "  same  $f ($L)" || echo "  DIFF  $f  local=$L pi=$R"
 done
 
 echo "=== 1) 传核心改动 ==="
+# v2.9.20: 含 path_planner.cpp —— S1 限速件; 曾漏同步 ⇒ Pi 重建会缺"降级限速"(半套 S1)
 for f in heightmap_2d5.h heightmap_2d5.cpp ground_segmentation.h ground_segmentation.cpp \
-         sensor_fusion.h sensor_fusion.cpp sensor_astra.cpp config.h; do
+         sensor_fusion.h sensor_fusion.cpp path_planner.cpp sensor_astra.cpp config.h; do
   timeout 120 scp -q -o ConnectTimeout=40 -o StrictHostKeyChecking=no -i $K "$CORE_SRC/$f" "$H:$CORE_DST/$f" || echo "  scp FAIL $f"
 done
 echo "  scp done"
