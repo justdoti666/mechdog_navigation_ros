@@ -54,6 +54,10 @@ public:
 
     /** 发送速度指令到底盘 */
     virtual void send_velocity(double linear, double angular) = 0;
+
+    // v2.9.21 (T-B4, 复审批 B12): 链路故障语义 —— 连续写失败(或串口未打开) ⇒ true。
+    //   节点侧可据此上报; Stm32 实现同时会尝试一帧零速兜底 (见下)。Simulated 恒 false。
+    virtual bool fault() const { return false; }
     // ROS-8 (v2.2): 删除未用的 create() 工厂方法 —— chassis_bridge_node 直接构造具体实现
     // (create 不传 port/baud, 且全库无调用方); 如需工厂可在节点层包一层带参构造
 };
@@ -123,9 +127,75 @@ public:
         double left_rpm  = mps_to_rpm(left_m_s);
         double right_rpm = mps_to_rpm(right_m_s);
 
-        // 4×float32 LE: FL, FR, RR, RL (两侧同速)
-        // 注: 轮序 FL=left/FR=right/RR=right/RL=left 为差速假定, 待 STM32 实机联调验证
+        // 4×float32 LE: FL, FR, RR, RL (两侧同速); T-B4: 组帧抽成 build_rpm_frame 供零速兜底复用
         uint8_t frame[21];
+        build_rpm_frame(frame, left_rpm, right_rpm);
+
+        if (fd_ >= 0) {
+            // H4 修复: 串口短写/失败必须重试, 否则 STM32 收到半个帧。
+            // 旧实现单次 write/WriteFile, 短写 (或 O_NONBLOCK 下 EAGAIN/TX 满) 仅打日志。
+            if (!write_frame_all(frame, sizeof(frame))) {
+                ++fail_streak_;
+                // v2.9.21 (T-B4, 复审批 B12): 连续 kFaultStreak 帧写失败 ⇒ 置故障 +
+                //   best-effort 发一帧**零速** (半帧/缓存残留场景让底盘尽快停下)。
+                //   故障后**不停止发布**: 每次调用仍继续尝试 (链路恢复自动解除)。
+                if (fail_streak_ >= kFaultStreak && !fault_) {
+                    fault_ = true;
+                    uint8_t zframe[21];
+                    build_rpm_frame(zframe, 0.0, 0.0);
+                    if (write_frame_all(zframe, sizeof(zframe))) ++zero_sent_;
+                    std::cerr << "[ChassisBridge:stm32] 连续 " << fail_streak_
+                              << " 帧写失败 ⇒ 链路故障: 已尝试零速兜底帧, "
+                              << "请检查串口接线/供电 (期间指令不保证到达底盘)" << std::endl;
+                } else if (!fault_) {
+                    std::cerr << "[ChassisBridge:stm32] 串口写失败/短写 (重试后仍失败): "
+                              << sizeof(frame) << " 字节 (连续 " << fail_streak_ << ")" << std::endl;
+                }
+            } else {
+                if (fault_) {
+                    std::cerr << "[ChassisBridge:stm32] 串口写恢复 ⇒ 故障解除" << std::endl;
+                }
+                fail_streak_ = 0;
+                fault_ = false;
+                // ROS-9 (v2.2): 成功路径每帧 cout 刷屏 -> 每 25 帧 (约 5s @5Hz) 打一次
+                if (++ok_tick_ % 25 == 0) {
+                    std::cout << "[ChassisBridge:stm32] vx=" << linear
+                              << " wz=" << angular
+                              << " RPM(L=" << left_rpm << ",R=" << right_rpm << ")"
+                              << " frame=" << (int)frame[2] << "/" << (int)frame[20]
+                              << std::endl;
+                }
+            }
+        } else {
+            // Low 修复: 串口未打开时避免每帧 (5Hz) cerr 刷屏 -- 每 25 帧打一次 (约 5s)
+            // v2.9.21 (T-B4): 未打开同样计入故障链 (连续 kFaultStreak 条未送达 ⇒ fault);
+            //   此时无端口可发零速兜底, 只能置位 + 日志。
+            ++not_open_count_;
+            ++fail_streak_;
+            if (fail_streak_ >= kFaultStreak && !fault_) {
+                fault_ = true;
+                std::cerr << "[ChassisBridge:stm32] 连续 " << fail_streak_
+                          << " 条指令因串口未打开被丢弃 ⇒ 链路故障: 指令未到达底盘, "
+                          << "且无法发零速兜底(无端口) —— 请检查串口设备" << std::endl;
+            }
+            if (not_open_tick_ >= 25) {
+                not_open_tick_ = 0;
+                std::cerr << "[ChassisBridge:stm32] 串口未打开, 丢弃指令"
+                          << " (已连续丢弃 " << not_open_count_ << " 条)" << std::endl;
+            }
+            ++not_open_tick_;
+        }
+    }
+
+    // v2.9.21 (T-B4): 链路故障标志 (连续写失败/串口未打开 ⇒ true; 写恢复自动解除)
+    bool fault() const override { return fault_; }
+    // T-B4: 测试观测 —— 已成功发出的零速兜底帧数
+    unsigned long zero_frame_sent() const { return zero_sent_; }
+
+private:
+    // T-B4: 21 字节帧组装 (AA 55 | 0x01 | 0x10 | 4×f32 LE | 累加和); 零速兜底同用此函数。
+    // 注: 轮序 FL=left/FR=right/RR=right/RL=left 为差速假定, 待 STM32 实机联调验证。
+    static void build_rpm_frame(uint8_t frame[21], double left_rpm, double right_rpm) {
         frame[0] = 0xAA;
         frame[1] = 0x55;
         frame[2] = 0x01;   // 命令: 设四轮 RPM
@@ -137,35 +207,8 @@ public:
         uint8_t cs = 0;
         for (int i = 0; i < 20; ++i) cs = (uint8_t)(cs + frame[i]);
         frame[20] = cs;
-
-        if (fd_ >= 0) {
-            // H4 修复: 串口短写/失败必须重试, 否则 STM32 收到半个帧。
-            // 旧实现单次 write/WriteFile, 短写 (或 O_NONBLOCK 下 EAGAIN/TX 满) 仅打日志。
-            if (!write_frame_all(frame, sizeof(frame))) {
-                std::cerr << "[ChassisBridge:stm32] 串口写失败/短写 (重试后仍失败): "
-                          << sizeof(frame) << " 字节" << std::endl;
-            }
-            // ROS-9 (v2.2): 成功路径每帧 cout 刷屏 -> 每 25 帧 (约 5s @5Hz) 打一次
-            if (++ok_tick_ % 25 == 0) {
-                std::cout << "[ChassisBridge:stm32] vx=" << linear
-                          << " wz=" << angular
-                          << " RPM(L=" << left_rpm << ",R=" << right_rpm << ")"
-                          << " frame=" << (int)frame[2] << "/" << (int)frame[20]
-                          << std::endl;
-            }
-        } else {
-            // Low 修复: 串口未打开时避免每帧 (5Hz) cerr 刷屏 -- 每 25 帧打一次 (约 5s)
-            ++not_open_count_;
-            if (not_open_tick_ >= 25) {
-                not_open_tick_ = 0;
-                std::cerr << "[ChassisBridge:stm32] 串口未打开, 丢弃指令"
-                          << " (已连续丢弃 " << not_open_count_ << " 条)" << std::endl;
-            }
-            ++not_open_tick_;
-        }
     }
 
-private:
     // H4 修复: 全量写入 + 重试。串口短写 (O_NONBLOCK 下 EAGAIN/TX 满, Windows 下
     // 缓冲满) 会导致 STM32 收到半个帧。循环补齐未写字节, 有限重试 3 轮。
     bool write_frame_all(const uint8_t* data, size_t len) {
@@ -201,6 +244,11 @@ private:
     unsigned int not_open_tick_ = 0;
     unsigned long not_open_count_ = 0;
     unsigned int ok_tick_ = 0;  // ROS-9: 成功路径节流计数
+    // v2.9.21 (T-B4): 链路故障语义 —— 连续失败计数 / 故障位 / 零速兜底成功数
+    static constexpr unsigned int kFaultStreak = 3;
+    unsigned int fail_streak_ = 0;
+    bool fault_ = false;
+    unsigned long zero_sent_ = 0;
 
     double mps_to_rpm(double v) const {
         if (wheel_radius_m_ <= 0.0) return 0.0;

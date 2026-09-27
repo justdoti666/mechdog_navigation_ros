@@ -157,6 +157,12 @@ if(BUILD_TESTING)
   if(TARGET test_sensor_geometry)
     target_include_directories(test_sensor_geometry PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
   endif()
+
+  # v2.9.21 (T-B4): 底盘桥串口故障语义 (不存在的串口 ⇒ fd<0 路径; 写失败分支同逻辑)
+  ament_add_gtest(test_chassis_bridge_fault test/test_chassis_bridge_fault.cpp SKIP_LINKING_MAIN_LIBRARIES)
+  if(TARGET test_chassis_bridge_fault)
+    target_include_directories(test_chassis_bridge_fault PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
+  endif()
 endif()
 
 ament_package()

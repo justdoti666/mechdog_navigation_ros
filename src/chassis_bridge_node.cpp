@@ -42,6 +42,12 @@ public:
             "cmd_vel", 10,
             [this](const geometry_msgs::msg::Twist::SharedPtr msg) {
                 bridge_->send_velocity(msg->linear.x, msg->angular.z);
+                // v2.9.21 (T-B4): 链路故障上报 (一次 WARN; 桥内部已尝试零速兜底帧)
+                if (bridge_->fault() && !fault_warned_) {
+                    fault_warned_ = true;
+                    RCLCPP_WARN(this->get_logger(),
+                        "底盘链路故障: 连续发送失败 -- 指令可能未到达底盘 (桥已尝试零速兜底帧)");
+                }
             });
 
         RCLCPP_INFO(this->get_logger(), "chassis_bridge_node 启动: bridge_type=%s",
@@ -51,6 +57,7 @@ public:
 private:
     std::unique_ptr<ChassisBridge> bridge_;
     rclcpp::Subscription<geometry_msgs::msg::Twist>::SharedPtr cmd_vel_sub_;
+    bool fault_warned_ = false;   // v2.9.21 (T-B4): 链路故障 WARN 只发一次
 };
 
 int main(int argc, char** argv) {
