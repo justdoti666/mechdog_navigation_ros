@@ -42,6 +42,7 @@
 #include "sensor_msgs/msg/image.hpp"
 #include "sensor_msgs/msg/camera_info.hpp"
 #include "std_msgs/msg/string.hpp"
+#include "rcl_interfaces/msg/set_parameters_result.hpp"   // T-A2b: 参数回调返回类型
 
 // 方案A: 订阅独立 ultrasonic_node 发布的 /ultrasonic (mechdog_ultrasonic 包的消息)
 #include "mechdog_ultrasonic/msg/ultrasonic_array.hpp"
@@ -220,6 +221,12 @@ public:
         // v2.9.18 (N9): status_text 提前到构造期创建 —— 启动期深度全坏时该话题也要被
         //   `ros2 topic list` 看到, 且降级文案(经 note_depth_bad)可以立即发布。
         status_text_pub_ = this->create_publisher<std_msgs::msg::String>("/safety/status_text", 1);
+        // v2.9.21 (T-A3, 复审批 R2/N9): 地形两话题的发布器也提前到构造期 ——
+        //   旧版在发布函数内惰性创建, 而早退路径(无帧/守门/空云)根本走不到那里 ⇒
+        //   启动即坏相机时 /safety/terrain_map、/safety/terrain_grid 连发布者都不存在
+        //   (ros2 topic list 看不到, 上位机订阅报 Unknown topic)。与 status_text 同一理由。
+        terrain_map_pub_  = this->create_publisher<sensor_msgs::msg::Image>("/safety/terrain_map", 1);
+        terrain_grid_pub_ = this->create_publisher<sensor_msgs::msg::Image>("/safety/terrain_grid", 1);
         depth_topic_ = this->declare_parameter("depth_topic",
             std::string("/camera/depth/image_raw"));
         depth_info_topic_ = this->declare_parameter("depth_info_topic",
@@ -251,6 +258,12 @@ public:
                 RCLCPP_INFO(this->get_logger(),
                     "超声来源=topic: 等待 /ultrasonic 首帧 —— 到达前超声不参与安全链 "
                     "(防未注入时回落内部模拟随机数)");
+                // v2.9.21 (T-B2①, 复审批 M-2 选项①): 披露语义 —— 本窗口内底部超声不在链上,
+                //   悬崖层暂不存在。实测该窗口行为 = STOP 等待数据 (非盲行; 见复核对表)。
+                //   纯日志, 不改行为。首帧到达后按下方恢复路径自动接回。
+                RCLCPP_WARN(this->get_logger(),
+                    "超声未接入(等待首帧) => 本段无悬崖保护(底部超声暂不在链上; 深度层不受影响); "
+                    "首帧到达自动接回");
             }
             fusion_->set_ultrasonic_enabled(ultrasonic_enabled_);
             // v2.9.19 (B4): 驱动注入超时与节点看门狗同源(旧版驱动 1.0s / 节点 500ms)
@@ -277,6 +290,35 @@ public:
                 ultrasonic_source_.c_str(), ultrasonic_requested_.c_str(),
                 static_cast<int>(hw_ok), pubs, ultrasonic_timeout_ms_);
         }
+        // v2.9.21 (T-A2b, 复审批 M-4): 运行期开关必须真的生效 ——
+        //   旧版 degraded_policy 只在构造期读一次: `ros2 param set` 改了成员不动,
+        //   现场"应急关闭降级链"根本关不掉(直到重启)。现在:
+        //     · 参数回调同步成员 (跨线程 → relaxed 原子);
+        //     · 关闭时立即无条件解除已生效的降级链 (不等下一枚好帧);
+        //     · 重新打开时若仍处降级段(node 侧 streak 标记), 立即重新接入。
+        param_cb_ = this->add_on_set_parameters_callback(
+            [this](const std::vector<rclcpp::Parameter>& params) {
+                rcl_interfaces::msg::SetParametersResult res;
+                res.successful = true;
+                for (const auto& p : params) {
+                    if (p.get_name() != "degraded_policy") continue;
+                    const bool on = p.as_bool();
+                    if (on == degraded_policy_.load()) continue;
+                    degraded_policy_.store(on);
+                    if (!on) {
+                        if (fusion_->depth_degraded()) fusion_->set_depth_degraded(false);
+                        RCLCPP_WARN(this->get_logger(),
+                            "degraded_policy -> false (运行期): 降级链立即解除, 回到仅上报");
+                    } else {
+                        if (depth_degraded_.load()) fusion_->set_depth_degraded(true);
+                        RCLCPP_WARN(this->get_logger(),
+                            "degraded_policy -> true (运行期): %s",
+                            depth_degraded_.load() ? "当前仍处降级段, 已立即重新接入"
+                                                   : "待下次进入降级段时生效");
+                    }
+                }
+                return res;
+            });
         planner_ = std::make_unique<PathPlanner>();
 
         // ---- 深度来源解析 + 启动 (v2.4) ----
@@ -647,9 +689,7 @@ private:
     // v2.9.17 (口径 ②): 降级时**主动**发一条状态文案 —— 坏帧走早退路径, 否则窗口永远显示
     //   最后一次"好"文案(现场看起来一切正常), 正是要消灭的"静默"。
     void publish_depth_degraded_status(const char* why) {
-        if (!status_text_pub_)
-            status_text_pub_ = this->create_publisher<std_msgs::msg::String>("/safety/status_text", 1);
-        std_msgs::msg::String s;
+        std_msgs::msg::String s;   // status_text_pub_ 构造期已创建 (v2.9.18 N9), 无惰性创建
         char b[256];
         std::snprintf(b, sizeof(b),
             "DEPTH DEGRADED: 连续 %d 轮无可用深度 (%.1fs, 最近原因=%s) -- 本轮不注入地形(fail-closed); "
@@ -708,7 +748,9 @@ private:
         if (depth_bad_streak_ == 0) return;
         const double dt = this->now().seconds() - depth_bad_t0_;
         if (depth_degraded_) {
-            if (degraded_policy_) fusion_->set_depth_degraded(false);   // S1: 降级解除, 限速/阈值复原
+            // T-A2b: 解除**无条件** —— 运行期关闭开关后即使本函数不再走到"启用"分支,
+            //   也绝不能残留收紧档 (旧版 `if (degraded_policy_)` 会让关开关后的恢复路径漏清)。
+            fusion_->set_depth_degraded(false);   // S1: 降级解除, 限速/阈值复原
             RCLCPP_WARN(this->get_logger(),
                 "深度恢复: 此前连续 %d 轮不可用 (%.2fs) ⇒ 降级解除%s", depth_bad_streak_, dt,
                 degraded_policy_ ? ", 限速/阈值复原" : "");
@@ -720,7 +762,114 @@ private:
                 "深度瞬时坏帧已恢复 (连续 %d 轮, 未达降级阈值 %d)", depth_bad_streak_, depth_bad_streak_n_);
         }
         depth_bad_streak_ = 0;
-        depth_degraded_   = false;
+        depth_degraded_   = false;   // T-A1/T-A2b: 原子写
+    }
+
+    // v2.9.21 (T-A3, 复审批 R2/N9): 地形可视化/状态发布统一入口。
+    //   hm == nullptr: 本轮没有可用的 2.5D 结果 (无帧 / 守门拦下 / 空云) -- 发"全未知"图,
+    //   保持话题节奏恒定; 不追加状态文案 (降级文案由 note_depth_bad ->
+    //   publish_depth_degraded_status 以 1Hz 节流独立发布, 避免 10Hz 刷屏)。
+    //   其余情况由 update_perception 传本轮真实结果 (行为与重构前逐字节一致)。
+    void publish_terrain(const HeightMap25Result* hm, bool plane_ok) {
+        const bool grid_ok = (hm != nullptr && hm->cols > 0 && hm->rows > 0);
+        HeightMap25Config hcfg;             // 仅取默认网格尺寸 (与 update_perception 同源)
+        hcfg.wedge_only = grid_wedge_only_;
+        const int cols = grid_ok ? hm->cols
+            : static_cast<int>((hcfg.max_x_m - hcfg.min_x_m) / hcfg.cell_size) + 1;
+        const int rows = grid_ok ? hm->rows
+            : static_cast<int>(2.0 * hcfg.y_half_m / hcfg.cell_size) + 1;
+        if (cols <= 0 || rows <= 0) return;   // 配置异常: 不发 (与旧版同)
+        const int sc = 4;                       // 放大倍数
+        const int W = rows * sc, H = cols * sc;   // 横轴=x(前进), 纵轴=y
+        sensor_msgs::msg::Image img;
+        img.header.stamp = this->now();
+        img.header.frame_id = "base_link";
+        img.height = H; img.width = W; img.encoding = "rgb8";
+        img.is_bigendian = 0; img.step = W * 3;
+        img.data.assign(static_cast<size_t>(W) * H * 3, 0);
+        auto color_of = [](CellFlag f) -> std::array<uint8_t, 3> {
+            switch (f) {
+                case CellFlag::Traversable: return {40, 200, 60};     // 绿=可通行
+                case CellFlag::ObstacleUp:  return {220, 50, 40};     // 红=凸起
+                case CellFlag::CliffDown:   return {40, 110, 220};    // 蓝=坑
+                case CellFlag::TooSteep:    return {230, 140, 20};    // 橙=过陡
+                default:                    return {45, 45, 45};      // 深灰=未知
+            }
+        };
+        if (!grid_ok) {
+            // 无平面/无网格/早退: 直接刷"深灰=未知"; 此时 hm 为空, 读它会越界
+            for (size_t o = 0; o + 2 < img.data.size(); o += 3) {
+                img.data[o] = 45; img.data[o + 1] = 45; img.data[o + 2] = 45;
+            }
+        } else {
+            for (int r = 0; r < hm->rows; ++r) {
+                for (int c = 0; c < hm->cols; ++c) {
+                    const CellFlag cf = plane_ok
+                        ? hm->flag[static_cast<size_t>(r) * hm->cols + c]
+                        : CellFlag::Unknown;   // 无平面 => 一律画未知 (不假装可通行)
+                    const auto col = color_of(cf);
+                    for (int dy = 0; dy < sc; ++dy) {
+                        for (int dx = 0; dx < sc; ++dx) {
+                            const int x = r * sc + dx, y = c * sc + dy;
+                            const size_t o = (static_cast<size_t>(y) * W + x) * 3;
+                            img.data[o] = col[0]; img.data[o + 1] = col[1]; img.data[o + 2] = col[2];
+                        }
+                    }
+                }
+            }
+        }
+        terrain_map_pub_->publish(img);
+        // ---- v2.9.13 紧凑地形话题 (给上位机/弱网用; 纯新增, 不影响任何判定) ----
+        //   布局: row-major, index = r*cols + c; cols = x(前)方向(0.6->3.0m, 5cm/格),
+        //         rows = y(左右)方向(-2.5->+2.5m); 取值 = CellFlag 0..4。
+        //   无平面/无网格时发全 0(=Unknown), 话题节奏恒定 (同 v2.9.8 对 terrain_map 的约定)。
+        sensor_msgs::msg::Image gimg;
+        gimg.header.stamp = img.header.stamp;
+        gimg.header.frame_id = "base_link";
+        gimg.height = rows; gimg.width = cols;
+        gimg.encoding = "mono8"; gimg.is_bigendian = 0;
+        gimg.step = static_cast<sensor_msgs::msg::Image::_step_type>(cols);
+        gimg.data.assign(static_cast<size_t>(cols) * static_cast<size_t>(rows), 0);
+        if (grid_ok && plane_ok) {
+            for (int r = 0; r < hm->rows; ++r) {
+                for (int c = 0; c < hm->cols; ++c) {
+                    const size_t i = static_cast<size_t>(r) * hm->cols + c;
+                    gimg.data[i] = static_cast<uint8_t>(hm->flag[i]);
+                }
+            }
+        }
+        terrain_grid_pub_->publish(gimg);
+        if (hm == nullptr) return;   // 早退: 不发状态文案 (降级文案 1Hz 节流独立发, 见上)
+        std_msgs::msg::String s;
+        char buf[512];
+        if (plane_ok) {
+            std::snprintf(buf, sizeof(buf),
+                "trav=%d  up=%d  down=%d  steep=%d   unknown=%d/4848   in_fov=%d/%d cov=%.0f%%   |  plane tilt=%.1f deg  h0=%.2fm",
+                hm->count_traversable, hm->count_up, hm->count_down, hm->count_steep, hm->count_unknown,
+                hm->count_in_fov, hm->cols * hm->rows, hm->fov_coverage() * 100.0,
+                std::acos(std::min(1.0, std::max(-1.0, static_cast<double>(seg_.plane.nz)))) *
+                    180.0 / 3.14159265358979323846,
+                static_cast<double>(seg_.plane.height_at_origin()));
+        } else if (depth_gate_hit_) {
+            // v2.9.12: 与"真没地面"区分开 -- 这是坏数据被守门拦下, 不是构图问题
+            std::snprintf(buf, sizeof(buf),
+                "DEPTH GATE (bad frame: valid=%.1f%% / %zu px) - terrain NOT injected this round | NOT a mounting/aim problem; retry or check camera/USB",
+                depth_gate_vr_ * 100.0, depth_gate_px_);
+        } else {
+            std::snprintf(buf, sizeof(buf),
+                "NO PLANE (fail-closed) - no ground plane in view; terrain NOT injected this round | in_fov=%d/%d cov=%.0f%% | plane tilt=--  h0=--  (pitch camera down onto open floor)",
+                hm->count_in_fov, cols * rows, hm->fov_coverage() * 100.0);
+        }
+        s.data = buf;
+        if (depth_degraded_.load()) {   // v2.9.17 (口径②) / v2.9.20 (S1): "连续坏帧" + 降级链 显式写进状态文本
+            char d2[224];
+            std::snprintf(d2, sizeof(d2),
+                "  |  DEPTH DEGRADED: 连续 %d 轮无可用深度 (%.1fs) -- 查相机/USB/光照, 非安装角%s",
+                depth_bad_streak_, this->now().seconds() - depth_bad_t0_,
+                degraded_policy_.load() ? " | 降级链:限速+阈值20-40-70cm" : "");
+            s.data += d2;
+        }
+        status_text_pub_->publish(s);
     }
 
     // 近场感知更新 (每轮融合节拍调用, **与是否发布点云解耦**):
@@ -737,6 +886,7 @@ private:
         if (!frame.valid || frame.depth_map.empty() ||
             frame.depth_width <= 0 || frame.depth_height <= 0) {
             fusion_->clear_local_terrain();   // 无帧 → 不注入地形 (行为回到接入路1之前)
+            publish_terrain(nullptr, false);  // T-A3: 早退也发"全未知"图, 话题不沉默
             note_depth_bad(0);   // v2.9.17 口径②: 计入"连续坏帧"
             return;  // 首帧未就绪 / 真机帧失效 (H1 同口径)
         }
@@ -761,6 +911,7 @@ private:
                 depth_gate_vr_  = vr;
                 depth_gate_px_  = dv;
                 fusion_->clear_local_terrain();   // 未就绪 ⇒ 路1 不表态 (行为回到接入路1之前)
+                publish_terrain(nullptr, false);  // T-A3: 早退也发"全未知"图, 话题不沉默
                 note_depth_bad(1);   // v2.9.17 口径②
                 return;
             }
@@ -784,6 +935,7 @@ private:
         if (cloud_ds_opt.points.empty()) {
             depth_gate_hit_ = true;   // v2.9.12: 全无效深度 ⇒ 数据坏, 非构图问题
             fusion_->clear_local_terrain();
+            publish_terrain(nullptr, false);  // T-A3: 早退也发"全未知"图, 话题不沉默
             note_depth_bad(2);   // v2.9.17 口径②
             return;  // 全无效深度
         }
@@ -816,126 +968,12 @@ private:
         fusion_->set_local_terrain(hm, seg_);
         note_depth_good();   // v2.9.17 口径②: 本轮拿到可用深度
 
-        // ---- v2.8.2 汇报用可视化: 发布 2.5D 可行度图 + 状态文本 ----
+        // ---- v2.8.2 汇报用可视化 (v2.9.21 T-A3: 渲染/发布统一移入 publish_terrain; 发布器构造期已创建) ----
         //   (画面上的可行度图 = 节点真实决策依据, 不是事后重算, 汇报口径最硬)
-        // v2.9.7: **每帧都发布** —— 原实现只在“平面有效”时才发, 无平面(如镜头对着墙)时
-        //   话题停更 ⇒ 汇报窗口那一格没有新帧可画 ⇒ 看起来像“卡死/卡顿”(实测被误判成 CPU 问题,
-        //   追查近一小时)。现在无论平面是否有效都发一张图, 话题节奏恒定;
-        //   无平面时发“全未知”图, 并在状态文本里写明原因。
+        // v2.9.7/v2.9.8: 每帧都发布, 无平面/无帧也发"全未知"图, 话题节奏恒定;
+        //   无平面时在状态文本里写明原因 (DEPTH GATE / NO PLANE)。
         const bool plane_ok = hm.valid && seg_.plane.valid;
-        const bool grid_ok = (hm.cols > 0 && hm.rows > 0);
-        // v2.9.8: 无平面时 build_heightmap_25 直接 return ⇒ 网格为空(fail-closed 是决策侧的正确行为),
-        //   但发布侧不能因此沉默: 否则汇报窗口那一格没有新帧可画, 看起来像卡死。
-        //   实测: 对着墙面/晃动时 /safety/terrain_map 90 秒零消息, 而深度仍 30Hz;
-        //   节点进程 State=S/wchan=futex_wait(未卡死) ⇒ 就是没走到发布。
-        //   现在按配置尺寸自造"全未知"图, 话题节奏恒定。
-        const int cols = grid_ok ? hm.cols
-            : static_cast<int>((hcfg.max_x_m - hcfg.min_x_m) / hcfg.cell_size) + 1;
-        const int rows = grid_ok ? hm.rows
-            : static_cast<int>(2.0 * hcfg.y_half_m / hcfg.cell_size) + 1;
-        if (cols > 0 && rows > 0) {
-            static rclcpp::Publisher<sensor_msgs::msg::Image>::SharedPtr tpub;
-            if (!tpub) tpub = this->create_publisher<sensor_msgs::msg::Image>("/safety/terrain_map", 1);
-            if (!status_text_pub_)   // v2.9.17: 改为成员 —— 降级时(早退路径)也要能主动发文案
-                status_text_pub_ = this->create_publisher<std_msgs::msg::String>("/safety/status_text", 1);
-            auto& spub = status_text_pub_;
-            static rclcpp::Publisher<sensor_msgs::msg::Image>::SharedPtr grpub;
-            if (!grpub) grpub = this->create_publisher<sensor_msgs::msg::Image>("/safety/terrain_grid", 1);
-            const int sc = 4;                       // 放大倍数
-            const int W = rows * sc, H = cols * sc;   // 横轴=x(前进), 纵轴=y
-            sensor_msgs::msg::Image img;
-            img.header.stamp = this->now();
-            img.header.frame_id = "base_link";
-            img.height = H; img.width = W; img.encoding = "rgb8";
-            img.is_bigendian = 0; img.step = W * 3;
-            img.data.assign(static_cast<size_t>(W) * H * 3, 0);
-            auto color_of = [](CellFlag f) -> std::array<uint8_t, 3> {
-                switch (f) {
-                    case CellFlag::Traversable: return {40, 200, 60};     // 绿=可通行
-                    case CellFlag::ObstacleUp:  return {220, 50, 40};     // 红=凸起
-                    case CellFlag::CliffDown:   return {40, 110, 220};    // 蓝=坑
-                    case CellFlag::TooSteep:    return {230, 140, 20};    // 橙=过陡
-                    default:                    return {45, 45, 45};      // 深灰=未知
-                }
-            };
-            if (!grid_ok) {
-                // 无平面/无网格: 直接刷"深灰=未知"; 此时 hm.flag 为空, 读它会越界
-                for (size_t o = 0; o + 2 < img.data.size(); o += 3) {
-                    img.data[o] = 45; img.data[o + 1] = 45; img.data[o + 2] = 45;
-                }
-            } else {
-                for (int r = 0; r < hm.rows; ++r) {
-                    for (int c = 0; c < hm.cols; ++c) {
-                        const CellFlag cf = plane_ok
-                            ? hm.flag[static_cast<size_t>(r) * hm.cols + c]
-                            : CellFlag::Unknown;   // 无平面 ⇒ 一律画未知 (不假装可通行)
-                        const auto col = color_of(cf);
-                        for (int dy = 0; dy < sc; ++dy) {
-                            for (int dx = 0; dx < sc; ++dx) {
-                                const int x = r * sc + dx, y = c * sc + dy;
-                                const size_t o = (static_cast<size_t>(y) * W + x) * 3;
-                                img.data[o] = col[0]; img.data[o + 1] = col[1]; img.data[o + 2] = col[2];
-                            }
-                        }
-                    }
-                }
-            }
-            tpub->publish(img);
-            // ---- v2.9.13 紧凑地形话题 (给上位机/弱网用; 纯新增, 不影响任何判定) ----
-            //   背景: /safety/terrain_map 是 x4 放大的 rgb8 渲染图 = 232704 字节/帧
-            //         ⇒ 10Hz 需 18.6 Mbit/s; 实测现场 WiFi 只有 ~1.25 Mbit/s ⇒ 上位机订不动。
-            //   本话题发**原生网格**(每格 1 字节): 4848 字节/帧 ⇒ 10Hz 仅 0.39 Mbit/s (小 46 倍)。
-            //   布局: row-major, index = r*cols + c; cols = x(前)方向(0.6→3.0m, 5cm/格),
-            //         rows = y(左右)方向(-2.5→+2.5m); 与内部 hm.flag 同序同义。
-            //   取值 = mechdog::CellFlag: 0=Unknown 1=Traversable 2=ObstacleUp 3=CliffDown 4=TooSteep
-            //   无平面/无网格时发全 0(=Unknown), 话题节奏恒定 (同 v2.9.8 对 terrain_map 的约定)。
-            sensor_msgs::msg::Image gimg;
-            gimg.header.stamp = img.header.stamp;
-            gimg.header.frame_id = "base_link";
-            gimg.height = rows; gimg.width = cols;
-            gimg.encoding = "mono8"; gimg.is_bigendian = 0;
-            gimg.step = static_cast<sensor_msgs::msg::Image::_step_type>(cols);
-            gimg.data.assign(static_cast<size_t>(cols) * static_cast<size_t>(rows), 0);
-            if (grid_ok && plane_ok) {
-                for (int r = 0; r < hm.rows; ++r) {
-                    for (int c = 0; c < hm.cols; ++c) {
-                        const size_t i = static_cast<size_t>(r) * hm.cols + c;
-                        gimg.data[i] = static_cast<uint8_t>(hm.flag[i]);
-                    }
-                }
-            }
-            grpub->publish(gimg);
-            std_msgs::msg::String s;
-            char buf[512];
-            if (plane_ok) {
-                std::snprintf(buf, sizeof(buf),
-                    "trav=%d  up=%d  down=%d  steep=%d   unknown=%d/4848   in_fov=%d/%d cov=%.0f%%   |  plane tilt=%.1f deg  h0=%.2fm",
-                    hm.count_traversable, hm.count_up, hm.count_down, hm.count_steep, hm.count_unknown,
-                    hm.count_in_fov, hm.cols * hm.rows, hm.fov_coverage() * 100.0,
-                    std::acos(std::min(1.0, std::max(-1.0, static_cast<double>(seg_.plane.nz)))) *
-                        180.0 / 3.14159265358979323846,
-                    static_cast<double>(seg_.plane.height_at_origin()));
-            } else if (depth_gate_hit_) {
-                // v2.9.12: 与"真没地面"区分开 —— 这是坏数据被守门拦下, 不是构图问题
-                std::snprintf(buf, sizeof(buf),
-                    "DEPTH GATE (bad frame: valid=%.1f%% / %zu px) - terrain NOT injected this round | NOT a mounting/aim problem; retry or check camera/USB",
-                    depth_gate_vr_ * 100.0, depth_gate_px_);
-            } else {
-                std::snprintf(buf, sizeof(buf),
-                    "NO PLANE (fail-closed) - no ground plane in view; terrain NOT injected this round | in_fov=%d/%d cov=%.0f%% | plane tilt=--  h0=--  (pitch camera down onto open floor)",
-                    hm.count_in_fov, cols * rows, hm.fov_coverage() * 100.0);
-            }
-            s.data = buf;
-            if (depth_degraded_) {   // v2.9.17 (口径②) / v2.9.20 (S1): "连续坏帧"+降级链 显式写进状态文本
-                char d2[224];
-                std::snprintf(d2, sizeof(d2),
-                    "  |  DEPTH DEGRADED: 连续 %d 轮无可用深度 (%.1fs) -- 查相机/USB/光照, 非安装角%s",
-                    depth_bad_streak_, this->now().seconds() - depth_bad_t0_,
-                    degraded_policy_ ? " | 降级链:限速+阈值20-40-70cm" : "");
-                s.data += d2;
-            }
-            spub->publish(s);
-        }
+        publish_terrain(&hm, plane_ok);
 
         // 诊断 (真机排查): 平面 / 2.5D / 负障碍 状态。
         // 没有这条日志时, "路1 一声不吭"只能靠猜 —— fail-closed 静默是安全设计,
@@ -1187,13 +1225,14 @@ private:
     int     depth_bad_streak_n_ = 3;      // 连续 N 轮无可用深度 ⇒ 降级 (参数 depth_bad_streak_n)
     int     depth_bad_streak_   = 0;      // 当前连续坏帧轮数 (好帧清零)
     double  depth_bad_t0_       = 0.0;    // 本段坏帧起始时刻 (秒)
-    bool    depth_degraded_     = false;  // 是否已上报"降级"
+    std::atomic<bool> depth_degraded_{false};   // 是否已上报"降级" (T-A1/T-A2b: executor 参数回调读 -> 原子)
     bool    depth_ever_good_    = false;  // 是否见过好帧 (v2.9.18 N9: 启动期也计数, 仅门槛提高)
     int     depth_last_reason_  = -1;     // 最近一次原因: 0=无帧 1=质量守门 2=点云为空
     double  last_degraded_status_s_ = -1e9;  // 上次主动发降级文案的时刻 (1Hz 节流)
     // v2.9.20 (S1, N2): 降级链开关 (参数 degraded_policy; true = 降级期"前进限速≤SLOW + 反应线 20/40/70cm")
-    bool    degraded_policy_    = true;
+    std::atomic<bool> degraded_policy_{true};   // T-A2b: executor 参数回调写 / 融合线程读 -> 原子
     rclcpp::Publisher<std_msgs::msg::String>::SharedPtr status_text_pub_;   // v2.9.18: 构造期已创建
+    rclcpp::node_interfaces::OnSetParametersCallbackHandle::SharedPtr param_cb_;   // T-A2b: 运行期参数回调(须存活)
     double  depth_gate_vr_   = 0.0;   // 本轮的深度有效率
     size_t  depth_gate_px_   = 0;     // 本轮的有效像素数
     double cloud_pitch_rad_ = 0.2617994; // 15°
@@ -1218,6 +1257,9 @@ private:
     // v2.9.15: 汇报用小图发布 (1/2 抽点深度; 见 publish_depth_small)
     bool publish_depth_small_ = true;
     rclcpp::Publisher<sensor_msgs::msg::Image>::SharedPtr depth_small_pub_;
+    // T-A3: 地形可视化发布器 (构造期创建 -- 启动坏相机时话题/发布者也必须存在)
+    rclcpp::Publisher<sensor_msgs::msg::Image>::SharedPtr terrain_map_pub_;
+    rclcpp::Publisher<sensor_msgs::msg::Image>::SharedPtr terrain_grid_pub_;
     int  depth_timeout_ms_ = 500;
     bool have_depth_rx_ = false;       // 收到过话题帧 (供超时看门狗判断)
     bool have_camera_info_ = false;
