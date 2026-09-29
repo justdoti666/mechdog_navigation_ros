@@ -58,7 +58,7 @@ python3 /home/chj/pi_replay.py /home/chj/frames_平地 10 1    # 每帧 @10Hz �
 
 | 脚本 | 用途 |
 |---|---|
-| `pi_gate_test.sh` | 深度质量守门（半自动：生成全 0 帧文件；**真注入流程待补** ⚠） |
+| `pi_gate_test.sh` | 深度质量守门**真机注入回归 v2**（2026-09-29, T6）：造全 0 帧 → 真注入(`pi_replay` 10Hz) → 断言（启动期降级/守门行 valid=0.0%/降级路径）→ PASS/FAIL+退出码；**不依赖相机硬件** |
 | `ultra_gate_check.sh` | **B4 超声启动门回归**（无需硬件）：`silent`/`once` 两种发布者场景，验证 等待首帧 → 重新接入 → 退出安全链 日志序列 |
 | `pi_depth_health.py` | 30~60s 深度流健康采样：帧率 / 有效像素占比 / 全零帧 / 坏帧计数 |
 | `pi_window_ab.sh` | **#9 真机验收**：窗口（旧/新）× 节点（`publish_depth_small` 关/开）四相位 CPU 对比 |
