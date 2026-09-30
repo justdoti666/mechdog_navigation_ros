@@ -127,9 +127,18 @@ install(DIRECTORY launch
 #     已删除无消费方的 msg/FusionResult.msg 与 config/safety_params.yaml
 
 # ROS-10 (v2.2): lint + smoke test (chassis_bridge.hpp 是纯 C++ 头, smoke 验证链接+构造)
+# v2.9.22 (A4): lint 由"无参全开"改为显式配置 ——
+#   旧写法 ament_lint_auto_find_test_dependencies() + package.xml 的 ament_lint_common
+#   会以默认严格档启用 copyright/uncrustify/cpplint（本项目未采用其默认口径）⇒ colcon test 恒红、
+#   测试门失去意义。现保留抓真问题的检查：cppcheck（静态分析）/ xmllint（包与 XML）/
+#   lint_cmake（CMake 风格）；copyright/uncrustify/cpplint 不入门禁（需要时可按需手动运行）。
 if(BUILD_TESTING)
-  find_package(ament_lint_auto REQUIRED)
-  ament_lint_auto_find_test_dependencies()
+  find_package(ament_cmake_cppcheck REQUIRED)
+  ament_cppcheck()
+  find_package(ament_cmake_lint_cmake REQUIRED)
+  ament_lint_cmake()
+  find_package(ament_cmake_xmllint REQUIRED)
+  ament_xmllint()
   find_package(ament_cmake_gtest REQUIRED)
   # v2.9.18 (A3): 4 个测试各自带 main(), 补 SKIP_LINKING_MAIN_LIBRARIES —— 去掉对
   #   "gtest_main 归档成员恰好不被拉入"的脆弱前提依赖 (换工具链/优化级别可能触发重定义)

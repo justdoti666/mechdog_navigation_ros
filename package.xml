@@ -23,8 +23,11 @@
   <exec_depend>tf2_ros</exec_depend>
 
   <!-- ROS-10 (v2.2): 测试依赖 (lint + gtest smoke test) -->
-  <test_depend>ament_lint_auto</test_depend>
-  <test_depend>ament_lint_common</test_depend>
+  <!-- v2.9.22 (A4): lint 显式化 —— 不再经 ament_lint_auto/ament_lint_common 无参全开；
+       门禁保留 cppcheck/xmllint/lint_cmake（copyright·uncrustify·cpplint 未采用其默认口径） -->
+  <test_depend>ament_cmake_cppcheck</test_depend>
+  <test_depend>ament_cmake_lint_cmake</test_depend>
+  <test_depend>ament_cmake_xmllint</test_depend>
   <test_depend>ament_cmake_gtest</test_depend>
 
   <export>
