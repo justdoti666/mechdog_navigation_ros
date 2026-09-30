@@ -20,6 +20,30 @@ if(NOT EXISTS "${MECHDOG_ALGO_DIR}/sensor_fusion.cpp")
   message(FATAL_ERROR "未找到纯算法库源码: ${MECHDOG_ALGO_DIR} (需要与 mechdog_navigation 仓库同级, 或传 -DMECHDOG_ALGO_DIR=<path>)")
 endif()
 
+# B17 (v2.9.22): 跨仓版本锁定 —— 断言所吃算法库源码的版本, 防"半批部署/新旧混合"静默漂移
+# 升级纪律: 两仓同批 —— core/version.h 的 PATCH+1 与下方 MECHDOG_CORE_VERSION_REQUIRED 必须一致
+set(MECHDOG_CORE_VERSION_REQUIRED 20922)
+if(NOT EXISTS "${MECHDOG_ALGO_DIR}/version.h")
+  message(FATAL_ERROR
+    "核心算法库缺少 version.h: ${MECHDOG_ALGO_DIR}\n"
+    "  ⇒ 核心侧过旧或与 ROS 包非同一批次; 同步两仓后重试 (B17 跨仓版本锁定)")
+endif()
+file(STRINGS "${MECHDOG_ALGO_DIR}/version.h" _mcdg_vstr_line REGEX "^#define +MECHDOG_CORE_VERSION_STR")
+file(STRINGS "${MECHDOG_ALGO_DIR}/version.h" _mcdg_vcode_line REGEX "^#define +MECHDOG_CORE_VERSION_CODE")
+string(REGEX MATCH "[0-9]+\\.[0-9]+\\.[0-9]+" _mcdg_ver "${_mcdg_vstr_line}")
+string(REGEX MATCH "[0-9]+" _mcdg_code "${_mcdg_vcode_line}")
+if(NOT _mcdg_code OR NOT _mcdg_ver)
+  message(FATAL_ERROR "无法解析核心 version.h 版本号: ${MECHDOG_ALGO_DIR}/version.h")
+endif()
+if(NOT _mcdg_code EQUAL MECHDOG_CORE_VERSION_REQUIRED)
+  message(FATAL_ERROR
+    "跨仓版本不匹配 (B17 锁定): 算法库 v${_mcdg_ver} (code ${_mcdg_code}) != ROS 包要求 (code ${MECHDOG_CORE_VERSION_REQUIRED})\n"
+    "  ⇒ 两仓必须同一批次: 更新算法库到所需版本, 或核对本包 MECHDOG_CORE_VERSION_REQUIRED")
+endif()
+message(STATUS "跨仓版本锁定 (B17) 通过: 算法库 v${_mcdg_ver} (code ${_mcdg_code}) == ROS 要求")
+# 编译期兜底: 任何 include version.h 的 TU 由 static_assert 再断一次 (断言在 version.h 内, 由本宏开启)
+add_compile_definitions(MECHDOG_ROS_REQ_CORE_VERSION=${MECHDOG_CORE_VERSION_REQUIRED})
+
 find_package(ament_cmake REQUIRED)
 find_package(rclcpp REQUIRED)
 find_package(std_msgs REQUIRED)

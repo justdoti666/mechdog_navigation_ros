@@ -84,6 +84,16 @@ ros2 launch mechdog_navigation_ros safety.launch.py use_simulated:=false depth_s
 ros2 run mechdog_ultrasonic ultrasonic_node
 ```
 
+### 跨仓版本锁定（v2.9.22 / B17）
+
+本包**直接编译** `../mechdog_navigation` 的源码（`MECHDOG_ALGO_DIR`）。为防止"半批部署 / 新旧混合"静默漂移（v2.8→v2.9.16 曾发生），自 v2.9.22 起：
+
+- 算法库版本见核心仓根 `version.h`（单点声明）；本包 `CMakeLists.txt` 的 `MECHDOG_CORE_VERSION_REQUIRED` 与它**必须一致**；
+- 不一致、或核心缺 `version.h` ⇒ **configure 期直接 FATAL**（报错含双方版本号与修法）；另有 `static_assert` 编译期兜底（`version.h` 内置，ROS 构建自动开启）；
+- `safety_node` 启动日志会打印实际组合：`核心算法库 vX.Y.Z (B17 跨仓锁定: core=…, ros_req=…)`。
+
+**升级纪律**：改版本时两仓同批 —— ① core `version.h` PATCH+1 并更新 `STR`/`CODE`；② 本包 `MECHDOG_CORE_VERSION_REQUIRED` 同步；③ 两仓同时推送。
+
 ## 话题接口
 
 | 话题 | 类型 | 方向 | 说明 |

@@ -34,6 +34,7 @@
 #include "config.h"
 #include "point_cloud.h"
 #include "mapping.h"
+#include "version.h"     // B17 (v2.9.22): 跨仓版本锁定 (static_assert 兜底)
 
 using namespace std::chrono_literals;
 

@@ -48,6 +48,8 @@
 #include "mechdog_ultrasonic/msg/ultrasonic_array.hpp"
 
 // 纯算法库
+#include "version.h"          // B17 (v2.9.22): 跨仓版本锁定 —— CMake 注入 MECHDOG_ROS_REQ_CORE_VERSION,
+                              // 与核心版本不一致时 version.h 内的 static_assert 直接编不过
 #include "sensor_astra.h"
 #include "sensor_ultrasonic.h"
 #include "sensor_ir.h"
@@ -547,6 +549,12 @@ public:
         RCLCPP_INFO(this->get_logger(),
             "safety_node 启动: use_simulated=%s, 融合周期 5Hz",
             use_simulated_ ? "true" : "false");
+        // B17 (v2.9.22): 跨仓版本锁定 —— 编译期已由 version.h 的 static_assert 保证一致;
+        //   这里把运行中的实际组合打进日志, 部署/排障时一眼可见。
+        RCLCPP_INFO(this->get_logger(),
+            "核心算法库 v%s (B17 跨仓锁定: core=%d, ros_req=%d)",
+            MECHDOG_CORE_VERSION_STR, MECHDOG_CORE_VERSION_CODE,
+            MECHDOG_ROS_REQ_CORE_VERSION);
     }
 
     ~SafetyNode() override {
