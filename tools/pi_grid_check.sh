@@ -2,14 +2,14 @@
 set +u
 export ROS_DOMAIN_ID=42
 source /opt/ros/jazzy/setup.bash 2>/dev/null
-source /home/chj/mdw_ws/install/setup.bash 2>/dev/null
+source $HOME/mdw_ws/install/setup.bash 2>/dev/null
 pkill -9 -f '[s]afety_node' 2>/dev/null
 sleep 2
-: > /home/chj/report_node.log
+: > $HOME/report_node.log
 setsid ros2 run mechdog_navigation_ros safety_node --ros-args \
   -p use_simulated:=false -p depth_source:=topic -p camera_height_m:=0.76 \
   -p cloud_z:=0.0 -p cloud_pitch_rad:=0.0 -p cloud_roll_rad:=0.0 \
-  -p ground_fit_method:=cell > /home/chj/report_node.log 2>&1 < /dev/null &
+  -p ground_fit_method:=cell > $HOME/report_node.log 2>&1 < /dev/null &
 sleep 14
 echo "=== (1) safety 话题 ==="
 timeout 8 ros2 topic list 2>/dev/null | grep -a safety | sed 's/^/  /'

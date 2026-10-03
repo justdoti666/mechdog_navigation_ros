@@ -17,8 +17,8 @@
 > 等价性（本地 WSL 验证）：小图与源帧抽点**逐像素一致**；新旧窗口渲染**整帧 720×612 = 0/440,640 像素差异**（JPEG 逐字节相同）。
 
 ```bash
-bash /home/chj/pi_view_up.sh        # 重启窗口服务（自动清旧进程与端口）
-REC=30 bash /home/chj/pi_record.sh  # 录像 30s → /home/chj/report_YYYYmmdd_HHMMSS.mp4
+bash ~/pi_view_up.sh                # 重启窗口服务（自动清旧进程与端口）
+REC=30 bash ~/pi_record.sh          # 录像 30s → ~/report_YYYYmmdd_HHMMSS.mp4
 ```
 
 浏览器：`http://<pi-ip>:8080/`（F11 全屏）。
@@ -33,14 +33,14 @@ REC=30 bash /home/chj/pi_record.sh  # 录像 30s → /home/chj/report_YYYYmmdd_H
 ## 2 取帧 / 同帧验证（离线重算 + 节点逐字段对照）
 
 ```bash
-python3 /home/chj/pi_frame_grab.py 5 平地     # 抓 5 帧 → /home/chj/frames_平地/
-python3 /home/chj/pi_replay.py /home/chj/frames_平地 10 1    # 每帧 @10Hz 回放一遍
+python3 ~/pi_frame_grab.py 5 平地     # 抓 5 帧 → ~/frames_平地/
+python3 ~/pi_replay.py ~/frames_平地 10 1    # 每帧 @10Hz 回放一遍
 ```
 
 - **`pi_frame_grab.py`**：存 `depth_*.npy`（16UC1 原始深度，640×480）+ `caminfo.json`（K/D）+ `stamps.txt`（原 stamp / 本机时刻 / 有效像素占比）+ `node_line.txt`（同批节点日志的 `感知:` 行）。
 - **`pi_replay.py`**：**沿用原时间戳**把帧灌回 `/camera/depth/image_raw` ⇒ 节点日志的 `感知:` 行可与离线计算**逐字段对齐**。
   - ⚠ 回放前**必须停掉真实相机**（`pkill -9 -f astra_camera_node`），否则两个深度源打架。
-  - 兼容旧用法：`python3 pi_replay.py /home/chj/real_depth.raw 20`（单个 `.raw` 帧回放 20 秒）。
+  - 兼容旧用法：`python3 pi_replay.py ~/real_depth.raw 20`（单个 `.raw` 帧回放 20 秒）。
 
 > 为什么必须"同一帧"：曾用**退化输入**（`plane=0` 的帧）去量成功路径耗时，结论全错 ⇒ 只有同一批像素才能当证据。
 
@@ -75,7 +75,7 @@ python3 /home/chj/pi_replay.py /home/chj/frames_平地 10 1    # 每帧 @10Hz �
 ## 6 部署
 
 ```bash
-bash tools/deploy_all.sh        # 完整部署: 核心改动 + ROS 包 + tools/*.sh|*.py → Pi (/home/chj/)
+bash tools/deploy_all.sh        # 完整部署: 核心改动 + ROS 包 + tools/*.sh|*.py → Pi 的 ~/
 ```
 
 ---

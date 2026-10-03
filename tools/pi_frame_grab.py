@@ -7,7 +7,7 @@
   2) cell vs RANSAC 对照(决策 1 的补充证据)
   3) 装机后复测: 同一工具、同一口径, 新旧对比
 
-产出(默认 /home/chj/frames_<标签>/):
+产出(默认 ~/frames_<标签>/):
   depth_000.npy     16UC1 原始深度(mm), 640x480
   caminfo.json      K/D/尺寸
   params.json       抓帧时的节点参数(从命令行传)
@@ -29,7 +29,7 @@ from rclpy.qos import QoSProfile, ReliabilityPolicy, HistoryPolicy
 
 N = int(sys.argv[1]) if len(sys.argv) > 1 else 5
 TAG = sys.argv[2] if len(sys.argv) > 2 else "grab"
-OUT = f"/home/chj/frames_{TAG}"
+OUT = os.path.expanduser(f"~/frames_{TAG}")
 os.makedirs(OUT, exist_ok=True)
 
 rclpy.init()
@@ -88,7 +88,7 @@ with open(os.path.join(OUT, "params.json"), "w", encoding="utf-8") as f:
 
 # 顺带捞节点日志里的 感知: 行(同批证据)
 try:
-    with open("/home/chj/report_node.log", "r", encoding="utf-8", errors="replace") as f:
+    with open(os.path.expanduser("~/report_node.log"), "r", encoding="utf-8", errors="replace") as f:
         lines = [l for l in f if "感知:" in l][-3:]
     with open(os.path.join(OUT, "node_line.txt"), "w", encoding="utf-8") as f:
         f.writelines(lines)

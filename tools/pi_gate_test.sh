@@ -8,8 +8,8 @@
 #   bash pi_gate_test.sh                                             # Pi 全流程(≈1 分钟)
 #   PI_HOME=/tmp/x MWD_WS=/tmp/mdw INJECT_SECS=12 bash pi_gate_test.sh   # 离线(WSL)自测用
 set +u
-PI_HOME="${PI_HOME:-/home/chj}"
-MWD_WS="${MWD_WS:-/home/chj/mdw_ws}"
+PI_HOME="${PI_HOME:-$HOME}"
+MWD_WS="${MWD_WS:-$HOME/mdw_ws}"
 INJECT_SECS="${INJECT_SECS:-20}"
 export ROS_DOMAIN_ID=42
 for _d in /opt/ros/*/setup.bash; do [ -f "$_d" ] && { source "$_d"; break; }; done

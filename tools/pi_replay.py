@@ -2,8 +2,8 @@
 # 回放 raw 深度到 /camera/depth/image_raw (用于"同一帧"节点 vs 基准 对照)
 #
 # v2 用法(2026-09-24 扩展): 支持"抓帧批次目录"
-#   单文件(旧): python3 pi_replay.py /home/chj/real_depth.raw 20      # 回放该帧 20 秒
-#   批次(新)  : python3 pi_replay.py /home/chj/frames_平地 10 1       # 目录里每帧@10Hz回放1遍
+#   单文件(旧): python3 pi_replay.py ~/real_depth.raw 20              # 回放该帧 20 秒
+#   批次(新)  : python3 pi_replay.py ~/frames_平地 10 1                # 目录里每帧@10Hz回放1遍
 #     批次目录由 pi_frame_grab.py 产出: depth_*.npy + caminfo.json + stamps.txt
 #     回放时**沿用原 stamp**(若 stamps.txt 有), 于是节点日志里的 感知: 行可与离线逐帧对齐。
 import sys, os, glob, json
@@ -11,7 +11,7 @@ import numpy as np, rclpy
 from rclpy.node import Node
 from sensor_msgs.msg import Image, CameraInfo
 
-arg1 = sys.argv[1] if len(sys.argv) > 1 else '/home/chj/real_depth.raw'
+arg1 = sys.argv[1] if len(sys.argv) > 1 else os.path.expanduser('~/real_depth.raw')
 BATCH = os.path.isdir(arg1)
 if BATCH:
     HZ = float(sys.argv[2]) if len(sys.argv) > 2 else 10.0
@@ -103,5 +103,5 @@ while rclpy.ok() and time.time() - t0 < hard_cap:
         break
 print(f"REPLAY_DONE frames={n.n}")
 if BATCH:
-    print(f"→ 现在对比: grep -a '感知:' /home/chj/report_node.log | tail -{len(order) // 2 + 2}")
+    print(f"→ 现在对比: grep -a '感知:' ~/report_node.log | tail -{len(order) // 2 + 2}")
 

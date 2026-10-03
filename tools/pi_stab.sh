@@ -14,6 +14,6 @@ iwconfig wlan0 2>/dev/null | grep -iE "quality|bit rate|signal" | head -3
 echo "=== 最近内核无线报错 ==="
 dmesg 2>/dev/null | tail -40 | grep -iE "brcmfmac|wlan|disconnect|deauth" | tail -4 || echo "(需 sudo 读 dmesg)"
 echo "=== 话题 === "
-source /opt/ros/jazzy/setup.bash 2>/dev/null; source /home/chj/astra_ws/install/setup.bash 2>/dev/null
+source /opt/ros/jazzy/setup.bash 2>/dev/null; source $HOME/astra_ws/install/setup.bash 2>/dev/null
 timeout 10 ros2 topic hz /camera/ir/image_raw 2>&1 | head -1
 timeout 10 ros2 topic hz /camera/depth/image_raw 2>&1 | head -1

@@ -6,7 +6,8 @@
 set +u
 K=/c/Users/老w/.ssh/id_ed25519; H=chj@192.168.123.86
 CORE_SRC=/c/Users/老w/Documents/dsh/mechdog_navigation
-CORE_DST=/home/chj/mdw_ws/src/mechdog_navigation
+PI_HOME=${PI_HOME:-/home/chj}   # 远端家目录(T3: 用户名/家目录变更时改这一处, 或 export PI_HOME)
+CORE_DST=$PI_HOME/mdw_ws/src/mechdog_navigation
 
 CORE_FILES=( "$CORE_SRC"/*.cpp "$CORE_SRC"/*.h )
 N_LOCAL=${#CORE_FILES[@]}
@@ -47,13 +48,13 @@ echo "  复核: $((N_LOCAL - MIS))/$N_LOCAL 一致"
 echo "=== 2) ROS 包部署 (WSL 构建 + scp + Pi 构建) ==="
 bash /c/Users/Public/deploy_roll.sh 2>&1 | grep -aE "finished|failed|error:|SCP_OK" | tail -4
 
-echo "=== 2b) 推 tools/ 脚本到 /home/chj/ (T1: 此前不推 tools, 干净 Pi 缺脚本) ==="
+echo "=== 2b) 推 tools/ 脚本到 Pi:$PI_HOME/ (T1: 此前不推 tools, 干净 Pi 缺脚本) ==="
 TOOLS_SRC=/c/Users/老w/Documents/dsh/mechdog_navigation_ros/tools
 for f in "$TOOLS_SRC"/*.sh "$TOOLS_SRC"/*.py; do
   base=$(basename "$f")
-  timeout 120 scp -q -o ConnectTimeout=40 -o StrictHostKeyChecking=no -i $K "$f" "$H:/home/chj/$base" || echo "  scp FAIL $base"
+  timeout 120 scp -q -o ConnectTimeout=40 -o StrictHostKeyChecking=no -i $K "$f" "$H:$PI_HOME/$base" || echo "  scp FAIL $base"
 done
-timeout 60 ssh -o ConnectTimeout=30 -o StrictHostKeyChecking=no -i $K $H 'chmod +x /home/chj/*.sh' && echo "  tools/ scp done"
+timeout 60 ssh -o ConnectTimeout=30 -o StrictHostKeyChecking=no -i $K $H 'chmod +x $HOME/*.sh' && echo "  tools/ scp done"
 
 echo "=== 3) 重启节点并观察 ==="
-timeout 240 ssh -o ConnectTimeout=30 -o StrictHostKeyChecking=no -i $K $H 'bash /home/chj/pi_tidy.sh >/dev/null 2>&1; sleep 15; grep -a "感知:" /home/chj/report_node.log | tail -2 | cut -c1-230' 2>/dev/null
+timeout 240 ssh -o ConnectTimeout=30 -o StrictHostKeyChecking=no -i $K $H 'bash $HOME/pi_tidy.sh >/dev/null 2>&1; sleep 15; grep -a "感知:" $HOME/report_node.log | tail -2 | cut -c1-230' 2>/dev/null

@@ -150,8 +150,8 @@ def record_frame(img):
     if REC <= 0 or REC_STATE["done"]:
         return
     if REC_STATE["writer"] is None:
-        os.makedirs("/home/chj", exist_ok=True)
-        REC_STATE["path"] = "/home/chj/report_%s.mp4" % _t.strftime("%Y%m%d_%H%M%S")
+        os.makedirs(os.path.expanduser("~"), exist_ok=True)
+        REC_STATE["path"] = os.path.expanduser("~/report_%s.mp4" % _t.strftime("%Y%m%d_%H%M%S"))
         REC_STATE["writer"] = cv2.VideoWriter(REC_STATE["path"], cv2.VideoWriter_fourcc(*"mp4v"),
                                               NOMINAL_FPS, (img.shape[1], img.shape[0]))
         REC_STATE["t0"] = _t.time()
