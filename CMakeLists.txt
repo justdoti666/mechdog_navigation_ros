@@ -157,8 +157,27 @@ install(DIRECTORY launch
 #   测试门失去意义。现保留抓真问题的检查：cppcheck（静态分析）/ xmllint（包与 XML）/
 #   lint_cmake（CMake 风格）；copyright/uncrustify/cpplint 不入门禁（需要时可按需手动运行）。
 if(BUILD_TESTING)
+  # v2.9.22 (N3, 2026-10-03 二轮审查复核): cppcheck 门禁真实化 ——
+  #   ① ament 默认跳过所有 cppcheck 2.x (性能名单; 本机 2.13.0) ⇒ 此前门禁"绿而无检查"。
+  #      以环境变量显式放行, 并挂到 cppcheck 测试上 (对其它 cppcheck 版本无害)。
+  #   ② cppcheck 2.13.0 对以下两文件必段错误 (2026-10-03 实测: -j1 与 --suppress=* 均无效,
+  #      上游 bug) ⇒ 只能显式列出分析目标把它们排除; 升级 cppcheck 后应恢复整目录扫描:
+  #        src/stb_image_write.h  (第三方单头库)
+  #        src/rgb_stream.cpp     (内联 STB_IMAGE_WRITE_IMPLEMENTATION)
   find_package(ament_cmake_cppcheck REQUIRED)
-  ament_cppcheck()
+  ament_cppcheck(
+    src/chassis_bridge.hpp
+    src/chassis_bridge_node.cpp
+    src/mapping_demo_node.cpp
+    src/safety_node.cpp
+    src/safety_warmup.hpp
+    src/sensor_geometry.hpp
+    src/ultrasonic_source.hpp
+    test
+    mechdog_ultrasonic/src
+    tools/mount_calib.cpp
+  )
+  set_tests_properties(cppcheck PROPERTIES ENVIRONMENT "AMENT_CPPCHECK_ALLOW_SLOW_VERSIONS=1")
   find_package(ament_cmake_lint_cmake REQUIRED)
   ament_lint_cmake()
   find_package(ament_cmake_xmllint REQUIRED)
