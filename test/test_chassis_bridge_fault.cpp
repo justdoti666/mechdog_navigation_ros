@@ -12,6 +12,7 @@
 #include <gtest/gtest.h>
 
 #include "chassis_bridge.hpp"
+#include "cmd_vel_watchdog.hpp"   // v2.9.23 (批B B12): 上游静默判据
 
 using namespace mechdog_ros;
 
@@ -38,4 +39,16 @@ TEST(ChassisBridgeFault, SimulatedNeverFaults) {
     s.send_velocity(0.20, 0.10);
     s.send_velocity(0.00, 0.00);
     EXPECT_FALSE(s.fault());
+}
+
+// v2.9.23 (批B B12 残, 二轮审查): 上游静默判据边界 —— 严格 > timeout 才触发;
+//   未设起点 (last<=0) 不判 (节点层用构造时刻做起点 ⇒ "启动→首指令"静默同样受保护)。
+TEST(UpstreamWatchdog, SilenceBoundary) {
+    const int64_t to = 500LL * 1000000;        // 500ms (ns)
+    const int64_t t0 = 1000000000LL;
+    EXPECT_FALSE(upstream_silent(0, t0, to));                  // 未设起点: 不判 (防御)
+    EXPECT_FALSE(upstream_silent(t0, t0 + to, to));            // 恰好 = timeout: 未超
+    EXPECT_FALSE(upstream_silent(t0, t0 + to - 1, to));        // 差 1ns: 未超
+    EXPECT_TRUE (upstream_silent(t0, t0 + to + 1, to));        // 超 1ns: 静默
+    EXPECT_TRUE (upstream_silent(t0, t0 + 10 * to, to));       // 长时间静默
 }
