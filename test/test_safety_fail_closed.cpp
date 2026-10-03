@@ -20,6 +20,8 @@
 #include "sensor_fusion.h"
 #include "path_planner.h"
 #include "safety_warmup.hpp"   // R4 (REVIEW): 启动预热等待
+#include "safety_ultra_gate.hpp"   // v2.9.23 (批B N1): 超声门窗口动作层策略
+#include "param_policy.hpp"        // v2.9.23 (批B N4): 运行期参数白名单
 
 using namespace mechdog;
 
@@ -139,6 +141,64 @@ TEST(DepthTopicSource, InjectedFrameDrivesFusionAndFailsClosed) {
     auto r2 = fusion.fuse();
     EXPECT_FALSE(r2.sensors_valid);
     EXPECT_EQ(r2.recommended_action, NavigationAction::STOP);
+}
+
+// ============================== v2.9.23 (批B) 新增 ==============================
+
+// N1 (二轮审查, 先红后绿): 超声"启动门窗口" —— source=topic 首帧未到 ⇒ 动作层一律 STOP
+//   (fail-closed)。修复前实测该窗口 action=FORWARD vel=(0.06→0.12 m/s) 照走 (cliff=no);
+//   本用例锁死窗口判定 + "窗口内任何动作 → STOP" + "窗口外逐位不变"。
+TEST(UltraGateWindow, WaitingFirstFrameForcesStop) {
+    // 窗口判定: 只看 (source=topic, 启动以来从未收帧)
+    EXPECT_TRUE (mechdog_ros::ultra_gate_waiting("topic", false));
+    EXPECT_FALSE(mechdog_ros::ultra_gate_waiting("topic", true));      // 首帧已到 ⇒ 自动接回
+    EXPECT_FALSE(mechdog_ros::ultra_gate_waiting("simulated", false));
+    EXPECT_FALSE(mechdog_ros::ultra_gate_waiting("hardware", false));
+    EXPECT_FALSE(mechdog_ros::ultra_gate_waiting("none", false));
+
+    // 窗口内: 一律 STOP (含 BACKWARD/TURN —— 无悬崖层时任何运动都可能朝坑)
+    EXPECT_EQ(mechdog_ros::gate_window_action(NavigationAction::FORWARD, true), NavigationAction::STOP);
+    EXPECT_EQ(mechdog_ros::gate_window_action(NavigationAction::SLOW_FORWARD, true), NavigationAction::STOP);
+    EXPECT_EQ(mechdog_ros::gate_window_action(NavigationAction::BACKWARD, true), NavigationAction::STOP);
+    EXPECT_EQ(mechdog_ros::gate_window_action(NavigationAction::TURN_LEFT, true), NavigationAction::STOP);
+    EXPECT_EQ(mechdog_ros::gate_window_action(NavigationAction::TURN_RIGHT, true), NavigationAction::STOP);
+    EXPECT_EQ(mechdog_ros::gate_window_action(NavigationAction::STOP, true), NavigationAction::STOP);
+
+    // 窗口外: 原样透传 (不引入任何行为变化)
+    EXPECT_EQ(mechdog_ros::gate_window_action(NavigationAction::FORWARD, false), NavigationAction::FORWARD);
+    EXPECT_EQ(mechdog_ros::gate_window_action(NavigationAction::BACKWARD, false), NavigationAction::BACKWARD);
+    EXPECT_EQ(mechdog_ros::gate_window_action(NavigationAction::SLOW_FORWARD, false), NavigationAction::SLOW_FORWARD);
+
+    // 与消费路径串联: 窗口内 STOP → planner 零速 (与 fail-closed 全链口径一致)
+    FusionResult r;
+    r.recommended_action = mechdog_ros::gate_window_action(NavigationAction::FORWARD, true);
+    PathPlanner planner;
+    VelocityCmd cmd = planner.plan(r);
+    EXPECT_DOUBLE_EQ(cmd.linear, 0.0);
+    EXPECT_DOUBLE_EQ(cmd.angular, 0.0);
+}
+
+// N4 (二轮审查): 运行期参数白名单 —— 仅"真能即时生效"的参数允许 set;
+//   其余 (话题/几何/开关, 启动期固化) 必须不在白名单 (回调会显式拒绝)。
+TEST(ParamPolicy, RuntimeWhitelistMatchesImpl) {
+    // 白名单 (7 项, 与 safety_node 回调 if-链逐一对应)
+    EXPECT_TRUE(mechdog_ros::param_runtime_syncable("degraded_policy"));
+    EXPECT_TRUE(mechdog_ros::param_runtime_syncable("depth_bad_streak_n"));
+    EXPECT_TRUE(mechdog_ros::param_runtime_syncable("depth_timeout_ms"));
+    EXPECT_TRUE(mechdog_ros::param_runtime_syncable("ultrasonic_timeout_ms"));
+    EXPECT_TRUE(mechdog_ros::param_runtime_syncable("publish_depth_small"));
+    EXPECT_TRUE(mechdog_ros::param_runtime_syncable("grid_wedge_only"));
+    EXPECT_TRUE(mechdog_ros::param_runtime_syncable("cloud_downsample_step"));
+    // 构造期参数: 必须拒绝 (修复前它们"param set 成功但永不生效")
+    EXPECT_FALSE(mechdog_ros::param_runtime_syncable("depth_topic"));
+    EXPECT_FALSE(mechdog_ros::param_runtime_syncable("depth_info_topic"));
+    EXPECT_FALSE(mechdog_ros::param_runtime_syncable("cloud_x"));
+    EXPECT_FALSE(mechdog_ros::param_runtime_syncable("cloud_pitch_rad"));
+    EXPECT_FALSE(mechdog_ros::param_runtime_syncable("ground_prior_z"));
+    EXPECT_FALSE(mechdog_ros::param_runtime_syncable("cmd_vel_topic"));
+    EXPECT_FALSE(mechdog_ros::param_runtime_syncable("use_simulated"));
+    EXPECT_FALSE(mechdog_ros::param_runtime_syncable("warmup_ms"));
+    EXPECT_FALSE(mechdog_ros::param_runtime_syncable("camera_height_m"));
 }
 
 int main(int argc, char** argv) {

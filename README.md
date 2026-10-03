@@ -117,7 +117,7 @@ ros2 run mechdog_ultrasonic ultrasonic_node
 ## 对接注意
 
 - **安全闸门**：本包发布 `/unsafe/cmd_vel`，由 `cmd_vel_safety_gate_node` 统一安全检查（estop/超时/限幅）后转发 `/cmd_vel`。若想绕过闸门直发（仅测试）：`--ros-args -p cmd_vel_topic:=/cmd_vel`。
-- **底盘通信**：`chassis_bridge_node` 订阅 `/cmd_vel`。默认 `bridge_type:=simulated`；真机 `bridge_type:=stm32` 时本包直接串口发 21 字节帧（协议同师兄）。**联调默认让 `wheel_board_bridge_node` 管串口，本包保持 simulated**，避免双写。
+- **底盘通信**：`chassis_bridge_node` 订阅 `/cmd_vel`。默认 `bridge_type:=simulated`；真机 `bridge_type:=stm32` 时本包直接串口发 21 字节帧（协议同师兄）。**联调默认让 `wheel_board_bridge_node` 管串口，本包保持 simulated**，避免双写。**v2.9.23 (批B B12)**：上游看门狗 —— `/cmd_vel` 静默超 `cmd_vel_timeout_ms`（默认 500ms）⇒ 告警 + 周期性零速兜底帧（防 STM32 永久保持最后指令）。
 - **ROS2 版本**：本包按 Jazzy（Ubuntu 24.04）写法；若环境是 Humble（22.04），代码无需改，仅构建环境不同。
 - **rgb_stream 安全**：`rgb_stream` 是无鉴权调试服务，绑定 `0.0.0.0`，局域网内任何设备都可查看摄像头画面与距离数据。仅限可信局域网调试使用，不要暴露到公网；如需长期运行建议改绑 `127.0.0.1`（改 `main` 中 `addr.sin_addr.s_addr`）或加反向代理鉴权。
 - **速度仲裁**：当前 safety_node 直接发布自己的规划结果。接入 Nav2 后，建议将 Nav2 输出作为闸门输入的另一个发布者（师兄闸门天然支持多输入），本层仅在检测到悬崖/近距障碍时覆盖输出。
@@ -126,17 +126,18 @@ ros2 run mechdog_ultrasonic ultrasonic_node
 - **地面提取（v2.9.16，口径①）**：`cell` 成功时跳过 RANSAC（`cell_skip_ransac:=false` 可回历史行为）；同工装对照平面精度 0.98°/1.39° → **0.02°**，节点日志带 `fit=cell/ransac` 供现场判定。
 - **退化期降级链（v2.9.20，S1/N2）**：连续坏帧达阈值 ⇒ 降级期间 **前进限速≤SLOW + 三级反应线收紧**（10/25/50 → 20/40/70cm，超声与融合两套阶梯同口径）；好帧自动解除。`degraded_policy:=false` 回 v2.9.19 纯上报行为（供 A/B）；数值为初始保守提案，待长跑误报率数据 + 会签定稿（单帧阈值与 fail-closed 口径不变）。
 - **v2.9.21 修复批（离线验证，未上真机）**：① 地形两话题**构造期创建** + 早退轮也发"全未知"图（启动即坏相机不再沉默，terrain_grid 仍 ~10Hz）；② `degraded_policy` **运行期** `ros2 param set` 即时生效（false⇒降级段内立即解除 / true⇒立即重新接入；此前缺回调"关不上"）；③ 超声未接入安全链时启动披露"本段无悬崖保护"；④ 底盘桥连续 3 次发送失败 ⇒ fault 标志 + best-effort 零速兜底帧；⑤ 地形渲染/发布重构后**正常路径逐字节等价**（固定合成帧 A/B：新旧构建各 60 帧 grid md5 全同、map 逐字节一致）。
+- **v2.9.23 修复批（批B 行为项）**：① **N1 门窗口动作层=STOP**（超声 source=topic 首帧未到期间，修复前实测照走 FORWARD 0.06→0.12 m/s；现强制 STOP，且 `/fusion_result`、`/safety/status_text`、5Hz 日志透出 `cliff_layer=waiting_first_frame`）；② **B12 残：chassis_bridge_node 上游看门狗**（`cmd_vel_timeout_ms` 默认 500ms，见上）；③ **N4 运行期参数白名单**（`ros2 param set` 仅白名单即时生效，其余明确拒绝，见「参数一览」注）；④ **B9 跨线程状态原子化/加锁**（超声链路状态、深度新鲜度、相机内参 —— 旧报告两次点名项）。版本 v2.9.22→v2.9.23（两仓同批）。
 - **前向全盲行为（接真机前必读）**：算法库在前向三方向全部失效（镜头被挡 + 三颗前向超声全坏）时输出 `SLOW_FORWARD` 降速盲行（仅 bottom 悬崖兜底），**不是 STOP**。接机械狗前务必与师兄闸门确认该场景有叠加保护；若本层是最后防线，按 mechdog_navigation README「已知限制」#7 把该分支改为 `STOP`。
 
 ## 参数一览（safety_node，共 33 个）
 
-`ros2 param set /safety_node <名> <值>` 或 `--ros-args -p <名>:=<值>` 均可改；标 ★ 的另有 launch 透传（`xxx:=值`）。
+启动期 `--ros-args -p <名>:=<值>` 均可改；**运行期 `ros2 param set` 仅白名单参数即时生效**（`degraded_policy` / `depth_bad_streak_n` / `depth_timeout_ms` / `ultrasonic_timeout_ms` / `publish_depth_small` / `grid_wedge_only` / `cloud_downsample_step`），其余参数会被**明确拒绝**并在 reason 说明（v2.9.23 批B N4：不再"静默成功但无效"）。标 ★ 的另有 launch 透传（`xxx:=值`）。
 
 | 分组 | 参数 | 默认 | 说明 |
 |---|---|---|---|
 | 来源/模式 | `use_simulated`★ | true | true=PC 模拟（无需硬件）；false=真机 |
 | | `depth_source`★ | auto | auto / **topic**（订 ROS 深度话题，Pi 用）/ sdk（Astra SDK 直读）/ simulated |
-| | `depth_topic`★ / `depth_info_topic` | /camera/depth/image_raw / /camera/depth/camera_info | 深度来源=topic 时的话题名（info 用 `param set` 改，无 launch 透传） |
+| | `depth_topic`★ / `depth_info_topic` | /camera/depth/image_raw / /camera/depth/camera_info | 深度来源=topic 时的话题名（info 无 launch 透传；**仅启动期** —— 运行期 `param set` 会被拒绝，v2.9.23 批B N4） |
 | | `depth_timeout_ms`★ | 500 | 深度帧超时（ms）⇒ 标失效（fail-closed，决策只剩超声） |
 | | `ultrasonic_source`★ | auto | auto / topic / hardware / simulated（仅台架）/ none |
 | | `allow_simulated_ultrasonic`★ | false | 真机模式把模拟超声接进安全链（默认拒绝，防假悬崖） |

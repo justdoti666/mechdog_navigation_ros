@@ -61,6 +61,9 @@
 #include "sensor_geometry.hpp"     // v2.6: 相机几何 → 地面高度先验
 #include "safety_warmup.hpp"   // R4 (REVIEW): 启动预热 —— 等 bottom 首帧再首轮 fuse
 #include "ultrasonic_source.hpp"   // v2.5: 超声来源解析 (真机拒绝模拟随机数)
+#include <cstdint>                 // v2.9.23 (批B B9): int64_t 时间戳 (ns 原子)
+#include "safety_ultra_gate.hpp"   // v2.9.23 (批B N1): 超声门窗口动作层策略 (纯函数)
+#include "param_policy.hpp"        // v2.9.23 (批B N4): 运行期参数白名单 (纯函数)
 
 using namespace mechdog;
 using namespace std::chrono_literals;
@@ -217,9 +220,10 @@ public:
         //   节点侧 1/2 抽点后发布 16UC1 320x240(约153KB/帧); 窗口此前自己就在做同样的
         //   1/2 抽点 ⇒ 显示结果逐像素不变。纯显示通道, 不参与任何判定。
         publish_depth_small_ = this->declare_parameter("publish_depth_small", true);
-        if (publish_depth_small_) {
-            depth_small_pub_ = this->create_publisher<sensor_msgs::msg::Image>("/safety/depth_small", 1);
-        }
+        // v2.9.23 (批B N4): 发布器**无条件创建** —— 运行期开关(publish_depth_small)只翻转
+        //   原子标志; 旧版初值 false 时发布器不存在, 运行期再打开也无法发布。零发布=零带宽,
+        //   与"关掉省带宽"语义一致。
+        depth_small_pub_ = this->create_publisher<sensor_msgs::msg::Image>("/safety/depth_small", 1);
         // v2.9.18 (N9): status_text 提前到构造期创建 —— 启动期深度全坏时该话题也要被
         //   `ros2 topic list` 看到, 且降级文案(经 note_depth_bad)可以立即发布。
         status_text_pub_ = this->create_publisher<std_msgs::msg::String>("/safety/status_text", 1);
@@ -247,33 +251,35 @@ public:
         {
             const std::size_t pubs = this->count_publishers("ultrasonic");
             const bool hw_ok = ultrasonic_->is_hardware_available();
-            ultrasonic_source_ = mechdog_ros::resolve_ultrasonic_source(
-                ultrasonic_requested_, use_simulated_, hw_ok, pubs, allow_simulated_ultrasonic_);
-            ultrasonic_enabled_ = (ultrasonic_source_ != "none");
+            set_ultra_source(mechdog_ros::resolve_ultrasonic_source(
+                ultrasonic_requested_, use_simulated_, hw_ok, pubs, allow_simulated_ultrasonic_));
+            ultrasonic_enabled_.store(ultra_source_snapshot() != "none");
             // v2.9.19 (复审批 B4): topic 来源在**首帧到达前一律不接入安全链**。
             //   旧版启动即 enabled=true, 而超时看门狗要"收到过首帧"才武装(have_ultra_rx_)
             //   ⇒ "有发布者但从未发帧"的窗口里 fuse() 消费的是算法库 read_all() 回落的
             //   内部模拟随机数(valid=true, 底部 5% 造悬崖) —— 安全链里绝不能有这种数据。
             //   首帧到达后走 ultra_sub_ 回调里的现成恢复路径(超声重新接入安全链)。
-            if (ultrasonic_source_ == "topic") {
-                ultrasonic_enabled_ = false;
+            if (ultra_source_snapshot() == "topic") {
+                ultrasonic_enabled_.store(false);
                 RCLCPP_INFO(this->get_logger(),
                     "超声来源=topic: 等待 /ultrasonic 首帧 —— 到达前超声不参与安全链 "
                     "(防未注入时回落内部模拟随机数)");
                 // v2.9.21 (T-B2①, 复审批 M-2 选项①): 披露语义 —— 本窗口内底部超声不在链上,
-                //   悬崖层暂不存在。实测该窗口行为 = STOP 等待数据 (非盲行; 见复核对表)。
-                //   纯日志, 不改行为。首帧到达后按下方恢复路径自动接回。
+                //   悬崖层暂不存在。⚠ v2.9.23 (批B N1) 更正: 旧注释"实测=STOP"被二轮审查证伪
+                //   —— 实测该窗口深度一新鲜就照走 FORWARD(0.06→0.12 m/s, cliff=no)。
+                //   现由门窗口策略强制动作层 STOP (见融合线程内 gate_window_action 覆盖);
+                //   首帧到达后按下方恢复路径自动接回。
                 RCLCPP_WARN(this->get_logger(),
                     "超声未接入(等待首帧) => 本段无悬崖保护(底部超声暂不在链上; 深度层不受影响); "
                     "首帧到达自动接回");
             }
-            fusion_->set_ultrasonic_enabled(ultrasonic_enabled_);
+            fusion_->set_ultrasonic_enabled(ultrasonic_enabled_.load());
             // v2.9.19 (B4): 驱动注入超时与节点看门狗同源(旧版驱动 1.0s / 节点 500ms)
             ultrasonic_->set_inject_timeout_sec(
-                static_cast<double>(ultrasonic_timeout_ms_) / 1000.0);
-            last_ultra_rx_ = std::chrono::steady_clock::now();   // 首帧等待计时起点
+                static_cast<double>(ultrasonic_timeout_ms_.load()) / 1000.0);
+            last_ultra_rx_ns_.store(steady_now_ns());   // 首帧等待计时起点
 
-            if (ultrasonic_source_ == "none") {
+            if (ultra_source_snapshot() == "none") {
                 RCLCPP_WARN(this->get_logger(),
                     "超声来源=none: 已从安全链**移除**超声 (不参与融合, 也不作悬崖判定)。"
                     "原因: 请求=%s 硬件(GPIO)=%d /ultrasonic 发布者=%zu —— "
@@ -282,15 +288,15 @@ public:
                     "或在 Pi 上编 USE_WIRINGPI 接真实 GPIO, 或(仅台架) "
                     "allow_simulated_ultrasonic:=true。",
                     ultrasonic_requested_.c_str(), static_cast<int>(hw_ok), pubs);
-            } else if (ultrasonic_source_ == "simulated" && !use_simulated_) {
+            } else if (ultra_source_snapshot() == "simulated" && !use_simulated_) {
                 RCLCPP_WARN(this->get_logger(),
                     "超声来源=simulated (真实模式下显式允许): 融合结果含**随机模拟数据**, "
                     "仅供台架验证, 不可据此判断真机安全行为。");
             }
             RCLCPP_INFO(this->get_logger(),
                 "超声来源: %s (请求=%s GPIO=%d /ultrasonic 发布者=%zu 超时=%dms)",
-                ultrasonic_source_.c_str(), ultrasonic_requested_.c_str(),
-                static_cast<int>(hw_ok), pubs, ultrasonic_timeout_ms_);
+                ultra_source_snapshot().c_str(), ultrasonic_requested_.c_str(),
+                static_cast<int>(hw_ok), pubs, ultrasonic_timeout_ms_.load());
         }
         // v2.9.21 (T-A2b, 复审批 M-4): 运行期开关必须真的生效 ——
         //   旧版 degraded_policy 只在构造期读一次: `ros2 param set` 改了成员不动,
@@ -303,20 +309,59 @@ public:
                 rcl_interfaces::msg::SetParametersResult res;
                 res.successful = true;
                 for (const auto& p : params) {
-                    if (p.get_name() != "degraded_policy") continue;
-                    const bool on = p.as_bool();
-                    if (on == degraded_policy_.load()) continue;
-                    degraded_policy_.store(on);
-                    if (!on) {
-                        if (fusion_->depth_degraded()) fusion_->set_depth_degraded(false);
-                        RCLCPP_WARN(this->get_logger(),
-                            "degraded_policy -> false (运行期): 降级链立即解除, 回到仅上报");
-                    } else {
-                        if (depth_degraded_.load()) fusion_->set_depth_degraded(true);
-                        RCLCPP_WARN(this->get_logger(),
-                            "degraded_policy -> true (运行期): %s",
-                            depth_degraded_.load() ? "当前仍处降级段, 已立即重新接入"
-                                                   : "待下次进入降级段时生效");
+                    const std::string& name = p.get_name();
+                    // v2.9.23 (批B N4, 二轮审查): 运行期白名单 —— 旧版"所有参数 set 都成功,
+                    //   但只有 degraded_policy 真生效" ⇒ 现场"看起来改上了"实际没有
+                    //   (README 曾教用户 param set 改 depth_info_topic, 永远无效)。
+                    //   现在: 白名单外**显式拒绝** (successful=false + reason 说明)。
+                    if (!mechdog_ros::param_runtime_syncable(name)) {
+                        res.successful = false;
+                        res.reason = "参数 '" + name + "' 仅启动期生效 (话题/几何/开关在构造期"
+                                     "固化), 运行期 set 已被拒绝 —— 请用 --ros-args/launch 重设并重启";
+                        continue;
+                    }
+                    if (name == "degraded_policy") {
+                        const bool on = p.as_bool();
+                        if (on == degraded_policy_.load()) continue;
+                        degraded_policy_.store(on);
+                        if (!on) {
+                            if (fusion_->depth_degraded()) fusion_->set_depth_degraded(false);
+                            RCLCPP_WARN(this->get_logger(),
+                                "degraded_policy -> false (运行期): 降级链立即解除, 回到仅上报");
+                        } else {
+                            if (depth_degraded_.load()) fusion_->set_depth_degraded(true);
+                            RCLCPP_WARN(this->get_logger(),
+                                "degraded_policy -> true (运行期): %s",
+                                depth_degraded_.load() ? "当前仍处降级段, 已立即重新接入"
+                                                       : "待下次进入降级段时生效");
+                        }
+                    } else if (name == "depth_bad_streak_n") {
+                        const int v = std::max(1, static_cast<int>(p.as_int()));
+                        depth_bad_streak_n_.store(v);
+                        RCLCPP_INFO(this->get_logger(), "depth_bad_streak_n -> %d (运行期生效)", v);
+                    } else if (name == "depth_timeout_ms") {
+                        const int v = std::max(50, static_cast<int>(p.as_int()));
+                        depth_timeout_ms_.store(v);
+                        RCLCPP_INFO(this->get_logger(), "depth_timeout_ms -> %d (运行期生效)", v);
+                    } else if (name == "ultrasonic_timeout_ms") {
+                        const int v = std::max(50, static_cast<int>(p.as_int()));
+                        ultrasonic_timeout_ms_.store(v);
+                        // 与驱动注入超时同源 (B4 口径: 节点看门狗与驱动 1:1)
+                        ultrasonic_->set_inject_timeout_sec(static_cast<double>(v) / 1000.0);
+                        RCLCPP_INFO(this->get_logger(),
+                            "ultrasonic_timeout_ms -> %d (运行期生效: 节点看门狗与驱动注入同步)", v);
+                    } else if (name == "publish_depth_small") {
+                        publish_depth_small_.store(p.as_bool());
+                        RCLCPP_INFO(this->get_logger(), "publish_depth_small -> %s (运行期生效)",
+                            p.as_bool() ? "true" : "false");
+                    } else if (name == "grid_wedge_only") {
+                        grid_wedge_only_.store(p.as_bool());
+                        RCLCPP_INFO(this->get_logger(), "grid_wedge_only -> %s (运行期生效)",
+                            p.as_bool() ? "true" : "false");
+                    } else if (name == "cloud_downsample_step") {
+                        const int v = std::max(1, static_cast<int>(p.as_int()));
+                        cloud_step_.store(v);
+                        RCLCPP_INFO(this->get_logger(), "cloud_downsample_step -> %d (运行期生效)", v);
                     }
                 }
                 return res;
@@ -348,7 +393,7 @@ public:
                 [this](sensor_msgs::msg::CameraInfo::SharedPtr m) { on_depth_info(std::move(m)); });
             RCLCPP_INFO(this->get_logger(),
                 "深度来源: ROS 话题 %s (内参 %s, 超时 %d ms) —— 不启动 Astra SDK 采集线程",
-                depth_topic_.c_str(), depth_info_topic_.c_str(), depth_timeout_ms_);
+                depth_topic_.c_str(), depth_info_topic_.c_str(), depth_timeout_ms_.load());
         } else {
             if (depth_source_ == "topic") {
                 RCLCPP_WARN(this->get_logger(),
@@ -382,13 +427,12 @@ public:
                 // v2.5: 超声话题超时 → 把超声移出安全链。
                 // 为什么不是"继续用旧帧": 不注入新鲜数据时, 算法库 read_all 会**回退到
                 // 内部模拟随机数** (带 valid=true, 底部 5% 造悬崖), 那比"没有超声"更危险。
-                if (ultrasonic_enabled_ && ultrasonic_source_ == "topic" && have_ultra_rx_) {
-                    const auto age_ms =
-                        std::chrono::duration_cast<std::chrono::milliseconds>(
-                            std::chrono::steady_clock::now() - last_ultra_rx_).count();
-                    if (age_ms > ultrasonic_timeout_ms_) {
-                        have_ultra_rx_ = false;
-                        ultrasonic_enabled_ = false;
+                if (ultrasonic_enabled_.load() && ultra_source_snapshot() == "topic" &&
+                    have_ultra_rx_.load()) {
+                    const auto age_ms = (steady_now_ns() - last_ultra_rx_ns_.load()) / 1000000;
+                    if (age_ms > ultrasonic_timeout_ms_.load()) {
+                        have_ultra_rx_.store(false);
+                        ultrasonic_enabled_.store(false);
                         fusion_->set_ultrasonic_enabled(false);
                         RCLCPP_WARN(this->get_logger(),
                             "/ultrasonic 已 %ld ms 无数据 → 超声退出安全链 "
@@ -398,10 +442,9 @@ public:
                 }
                 // v2.9.19 (B4): 发布者存在但从未发过首帧 ⇒ 5s 时 WARN 一次 (现场可诊断)。
                 //   只针对"从未收到"; 收到过后再静默由上面的超时看门狗负责。
-                if (!ultrasonic_enabled_ && ultrasonic_source_ == "topic" &&
-                    !have_ultra_rx_ && !ultra_ever_rx_) {
-                    const auto age_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
-                        std::chrono::steady_clock::now() - last_ultra_rx_).count();
+                if (!ultrasonic_enabled_.load() && ultra_source_snapshot() == "topic" &&
+                    !have_ultra_rx_.load() && !ultra_ever_rx_.load()) {
+                    const auto age_ms = (steady_now_ns() - last_ultra_rx_ns_.load()) / 1000000;
                     if (age_ms > 5000 && !topic_wait_warned_) {
                         topic_wait_warned_ = true;
                         RCLCPP_WARN(this->get_logger(),
@@ -412,13 +455,11 @@ public:
                 }
                 // v2.4: 深度话题超时看门狗 —— 源断了就把帧标记失效 (fail-closed):
                 //   不这么做的话, 最后一帧会被无限复用 (假"看得见"), 比看不见更危险。
-                if (have_depth_rx_) {
-                    const auto age_ms =
-                        std::chrono::duration_cast<std::chrono::milliseconds>(
-                            std::chrono::steady_clock::now() - last_depth_rx_).count();
-                    if (age_ms > depth_timeout_ms_) {
+                if (last_depth_rx_ns_.load() != 0) {   // B9: 时间戳原子 (0=无帧/已失效)
+                    const auto age_ms = (steady_now_ns() - last_depth_rx_ns_.load()) / 1000000;
+                    if (age_ms > depth_timeout_ms_.load()) {
                         astra_->invalidate_frame();
-                        have_depth_rx_ = false;   // 只失效一次, 避免每轮刷屏
+                        last_depth_rx_ns_.store(0);   // 只失效一次, 避免每轮刷屏
                         RCLCPP_WARN(this->get_logger(),
                             "深度话题 %s 已 %ld ms 无数据 → 深度帧标记失效 "
                             "(fail-closed, 决策仅剩超声)",
@@ -428,6 +469,27 @@ public:
                 auto result = fusion_->fuse();
                 // ROS-3: 先判停止, 再决定是否写共享状态 (析构中不再访问成员)
                 if (!fusion_running_.load()) break;
+                // v2.9.23 (批B N1, 二轮审查修复): 超声"启动门窗口" (source=topic 首帧未到)
+                //   —— 本段无悬崖层, 动作层强制 STOP (fail-closed)。修复前实测该窗口
+                //   action=FORWARD vel=(0.06→0.12 m/s) 照走 (cliff=no); 旧注释"实测=STOP"被证伪。
+                //   链状态同时快照给 JSON/status_text/5Hz 日志 (cliff_layer/ultra=)。纯动作层覆盖,
+                //   不动融合/阈值/单帧口径; 首帧到达(ultra_ever_rx_)后自动退出窗口。
+                int chain_state;
+                if (ultrasonic_enabled_.load()) {
+                    chain_state = 1;   // 超声在安全链上
+                } else if (ultra_source_snapshot() == "topic" && !ultra_ever_rx_.load()) {
+                    chain_state = 2;   // 门窗口: 等首帧
+                } else {
+                    chain_state = 0;   // 不在链上 (none/simulated/hardware/超时退出)
+                }
+                ultra_chain_state_.store(chain_state);
+                if (chain_state == 2) {
+                    result.recommended_action = mechdog_ros::gate_window_action(
+                        result.recommended_action, true);
+                    RCLCPP_WARN_THROTTLE(this->get_logger(), *this->get_clock(), 5000,
+                        "超声首帧未到(门窗口): 动作层强制 STOP (fail-closed; 本段无悬崖层, "
+                        "首帧到达自动接回)");
+                }
                 // 路1: 近场地形状态变化时提示 (与核心仓 main.cpp 同口径, 便于真机排查)
                 if (result.terrain_block_near || result.terrain_block_mid) {
                     RCLCPP_WARN_THROTTLE(this->get_logger(), *this->get_clock(), 2000,
@@ -486,7 +548,7 @@ public:
             neg_pub_ = this->create_publisher<sensor_msgs::msg::PointCloud2>(neg_topic_, 5);
             RCLCPP_INFO(this->get_logger(),
                 "近场点云已启用: topic=%s frame=%s 下采样步长=%d (配合 static TF %s -> base_link)",
-                cloud_topic_.c_str(), cloud_frame_.c_str(), cloud_step_,
+                cloud_topic_.c_str(), cloud_frame_.c_str(), cloud_step_.load(),
                 cloud_frame_.c_str());
             RCLCPP_INFO(this->get_logger(),
                 "负障碍检测已启用: topic=%s frame=%s (P1 地面分割, 落差阈值 %.2fm)",
@@ -529,13 +591,13 @@ public:
                 ultrasonic_->inject_external_data(d);
 
                 // v2.5: 记录新鲜度 + 恢复入口 —— 真数据到了就把超声重新接回安全链
-                last_ultra_rx_ = std::chrono::steady_clock::now();
-                have_ultra_rx_ = true;
-                ultra_ever_rx_ = true;   // v2.9.19 (B4)
-                if (!ultrasonic_enabled_ && (ultrasonic_requested_ == "auto" ||
-                                             ultrasonic_requested_ == "topic")) {
-                    ultrasonic_source_ = "topic";
-                    ultrasonic_enabled_ = true;
+                last_ultra_rx_ns_.store(steady_now_ns());   // B9: int64 时间戳原子
+                have_ultra_rx_.store(true);
+                ultra_ever_rx_.store(true);   // v2.9.19 (B4); B9 原子
+                if (!ultrasonic_enabled_.load() && (ultrasonic_requested_ == "auto" ||
+                                                    ultrasonic_requested_ == "topic")) {
+                    set_ultra_source("topic");   // B9: 加锁写
+                    ultrasonic_enabled_.store(true);
                     fusion_->set_ultrasonic_enabled(true);
                     RCLCPP_WARN(this->get_logger(),
                         "/ultrasonic 数据已到达 → 超声重新接入安全链 (来源=topic)");
@@ -641,8 +703,7 @@ private:
                              + static_cast<double>(msg->header.stamp.nanosec) * 1e-9;
         const auto t_inj0 = std::chrono::steady_clock::now();
         if (astra_->inject_depth_frame(buf, w, h, stamp_s)) {
-            last_depth_rx_ = std::chrono::steady_clock::now();
-            have_depth_rx_ = true;
+            last_depth_rx_ns_.store(steady_now_ns());   // B9: int64 时间戳原子
         }
         const auto t_inj1 = std::chrono::steady_clock::now();
         // 主线程耗时(供感知线程一并打印; 仅日志用, 允许无锁读取)
@@ -656,7 +717,7 @@ private:
     // 只做整数抽点, 不新建全分辨率缓冲 ⇒ 成本(估算, 待真机实测) 约 0.2~0.5ms/帧。
     void publish_depth_small(const std::vector<uint16_t>& buf, int w, int h,
                              const std_msgs::msg::Header& header) {
-        if (!depth_small_pub_) return;
+        if (!depth_small_pub_ || !publish_depth_small_.load()) return;   // v2.9.23 (批B N4): 运行期开关
         const int w2 = w / 2, h2 = h / 2;
         if (w2 <= 0 || h2 <= 0) return;
         auto img = std::make_unique<sensor_msgs::msg::Image>();
@@ -681,6 +742,9 @@ private:
     // 深度内参话题 → 替换 FOV 反推内参 (点云 / 2.5D / 路1 全部受益)
     void on_depth_info(sensor_msgs::msg::CameraInfo::SharedPtr msg) {
         if (msg->k[0] > 0.0 && msg->k[4] > 0.0) {
+            // v2.9.23 (批B B9): 内参跨线程 —— 本回调 (executor) 写 / update_perception
+            //   (融合线程) 读, 旧版裸字段数据竞争。现加锁, 读侧取快照。
+            std::lock_guard<std::mutex> lk(camera_info_mutex_);
             cloud_K_.fx = msg->k[0];
             cloud_K_.fy = msg->k[4];
             cloud_K_.cx = msg->k[2];
@@ -718,8 +782,8 @@ private:
         if (depth_bad_streak_ == 0) depth_bad_t0_ = this->now().seconds();
         ++depth_bad_streak_;
         const int eff_n = depth_ever_good_
-            ? std::max(1, depth_bad_streak_n_)
-            : std::max(30, depth_bad_streak_n_);
+            ? std::max(1, depth_bad_streak_n_.load())
+            : std::max(30, depth_bad_streak_n_.load());
         const char* why = (reason == 0) ? "no frame" : (reason == 2) ? "empty cloud" : "quality gate";
         if (depth_bad_streak_ == eff_n && !depth_degraded_) {
             depth_degraded_ = true;
@@ -738,7 +802,7 @@ private:
                 RCLCPP_WARN(this->get_logger(),
                     "深度降级: 连续 %d 轮拿不到可用深度 (%.2fs, 最近原因=%s) ⇒ 路1/2.5D 持续 abstain; %s; "
                     "排查方向 = 相机/USB/光照, 不是安装角。好帧自动解除 (参数 depth_bad_streak_n=%d)",
-                    depth_bad_streak_, this->now().seconds() - depth_bad_t0_, why, chain, depth_bad_streak_n_);
+                    depth_bad_streak_, this->now().seconds() - depth_bad_t0_, why, chain, depth_bad_streak_n_.load());
             }
         }
         if (depth_degraded_) {
@@ -767,7 +831,7 @@ private:
                 "深度流就绪: 启动期 %d 轮无可用深度 (%.2fs) 后拿到首帧", depth_bad_streak_, dt);
         } else {
             RCLCPP_INFO_THROTTLE(this->get_logger(), *this->get_clock(), 5000,
-                "深度瞬时坏帧已恢复 (连续 %d 轮, 未达降级阈值 %d)", depth_bad_streak_, depth_bad_streak_n_);
+                "深度瞬时坏帧已恢复 (连续 %d 轮, 未达降级阈值 %d)", depth_bad_streak_, depth_bad_streak_n_.load());
         }
         depth_bad_streak_ = 0;
         depth_degraded_   = false;   // T-A1/T-A2b: 原子写
@@ -877,6 +941,9 @@ private:
                 degraded_policy_.load() ? " | 降级链:限速+阈值20-40-70cm" : "");
             s.data += d2;
         }
+        if (ultra_chain_state_.load() == 2) {   // v2.9.23 (批B N1): 门窗口显式披露 (动作层=STOP)
+            s.data += "  |  超声未接入(等待首帧): 本段无悬崖保护, 动作层=STOP (fail-closed)";
+        }
         status_text_pub_->publish(s);
     }
 
@@ -930,12 +997,18 @@ private:
         //   改为**直接按步长反投影**: 只算 1/step 的像素, 之后所有变换只在这个小子集上做 ⇒ 预计 ~5ms/帧。
         //   等价性: 新点集的每个点, 与老实现同像素算出的点**逐位相同**(子集关系);
         //   test_strided_backprojection_subset 覆盖, 并用变异测试确认它真的会失败(failed=1)。
-        const size_t step = static_cast<size_t>((cloud_step_ > 1) ? cloud_step_ : 1);
+        const int step_i = std::max(1, cloud_step_.load());   // N4: 运行期可 set (原子)
+        const size_t step = static_cast<size_t>(step_i);
         const auto tS1 = std::chrono::steady_clock::now();
         ms_gate_ = std::chrono::duration<double, std::milli>(tS1 - tS0).count();
         PointCloud cloud_ds_opt;
+        CameraIntrinsics K_snapshot;   // B9: 内参快照 (on_depth_info 可能并发写 cloud_K_)
+        {
+            std::lock_guard<std::mutex> lk(camera_info_mutex_);
+            K_snapshot = cloud_K_;
+        }
         depth_to_cloud_strided(frame.depth_map.data(), frame.depth_width,
-                               frame.depth_height, cloud_K_,
+                               frame.depth_height, K_snapshot,
                                static_cast<int>(step), cloud_ds_opt);
         // 发布用的 camera_link 系点云: 由同一份小点云转一次得到 (不再做全量变换)
         cloud_ds_link_ = PointCloud{};
@@ -1153,13 +1226,14 @@ private:
             size_t scan_n;
             { std::lock_guard<std::mutex> lk(scan_mutex_); scan_n = scan_ranges_.size(); }
             RCLCPP_INFO(this->get_logger(),
-                "env=%s cliff=%s min_fwd=%.2fm action=%s vel=(%.2f, %.2f) scan=%zu degraded=%s",
+                "env=%s cliff=%s min_fwd=%.2fm action=%s vel=(%.2f, %.2f) scan=%zu degraded=%s ultra=%s",
                 env_to_str(result.environment),
                 result.cliff_detected ? "YES" : "no",
                 result.min_forward_distance_m,
                 action_to_str(result.recommended_action),  // ROS-6 v2.2: 枚举改字符串名
                 cmd.linear, cmd.angular,
-                scan_n, result.depth_degraded ? "YES" : "no");
+                scan_n, result.depth_degraded ? "YES" : "no",
+                chain_state_to_str(ultra_chain_state_.load()));   // v2.9.23 (批B N1): 超声链状态
         }
     }
 
@@ -1169,6 +1243,20 @@ private:
     std::unique_ptr<InfraRedSensor> ir_;
     std::unique_ptr<SensorFusion> fusion_;
     std::unique_ptr<PathPlanner> planner_;
+
+    // v2.9.23 (批B B9): steady_clock 纳秒时间戳 (跨线程用 int64 原子) + 来源字符串访问器
+    static int64_t steady_now_ns() {
+        return std::chrono::duration_cast<std::chrono::nanoseconds>(
+            std::chrono::steady_clock::now().time_since_epoch()).count();
+    }
+    std::string ultra_source_snapshot() {
+        std::lock_guard<std::mutex> lk(ultra_state_mutex_);
+        return ultrasonic_source_;
+    }
+    void set_ultra_source(const std::string& s) {
+        std::lock_guard<std::mutex> lk(ultra_state_mutex_);
+        ultrasonic_source_ = s;
+    }
 
     // H3: 独立融合线程 + 最新结果缓存 (timer 回调只读缓存, 锁保护)
     std::thread fusion_thread_;
@@ -1204,10 +1292,10 @@ private:
 
     // 近场点云 (P3): 参数 + 内参 (FOV 反推, 真机标定后改 SDK 直读, 见设计文档 §3.2)
     bool enable_pointcloud_ = false;
-    bool grid_wedge_only_ = true;   // v2.8.3 视场楔形(仅统计口径: in_fov/覆盖率)
+    std::atomic<bool> grid_wedge_only_{true};   // v2.8.3 视场楔形(仅统计口径) + N4: 运行期可 set
     std::string cloud_topic_ = "/mechdog/point_cloud";
     std::string cloud_frame_ = "camera_link";
-    int cloud_step_ = 8;
+    std::atomic<int> cloud_step_{8};   // v2.9.23 (批B N4): 运行期可 set
     CameraIntrinsics cloud_K_;
 
     // 负障碍 (P1): 地面分割参数取算法库默认 (GroundSegConfig), 手持实验改 config.h
@@ -1230,7 +1318,7 @@ private:
     // "NO PLANE ... (pitch camera down onto open floor)", 现场会误导 (明明对着地面却被告知朝下压)
     bool    depth_gate_hit_  = false;
     // v2.9.17 (口径 ②) + v2.9.20 (S1, N2): 深度可用性"时域"记录 与 降级链开关
-    int     depth_bad_streak_n_ = 3;      // 连续 N 轮无可用深度 ⇒ 降级 (参数 depth_bad_streak_n)
+    std::atomic<int> depth_bad_streak_n_{3};   // 连续 N 轮无可用深度 ⇒ 降级 (N4: 运行期可 set)
     int     depth_bad_streak_   = 0;      // 当前连续坏帧轮数 (好帧清零)
     double  depth_bad_t0_       = 0.0;    // 本段坏帧起始时刻 (秒)
     std::atomic<bool> depth_degraded_{false};   // 是否已上报"降级" (T-A1/T-A2b: executor 参数回调读 -> 原子)
@@ -1248,30 +1336,41 @@ private:
     double prior_window_m_ = -1.0;       // 地面高度先验半带宽 (<=0 = 用仓库默认)
 
     // ---- 超声来源 (v2.5): 拒绝把模拟随机数喂进安全链 ----
-    std::string ultrasonic_requested_ = "auto";   // 用户请求值
-    std::string ultrasonic_source_ = "auto";      // 解析后的实际来源
-    bool        ultrasonic_enabled_ = true;       // 是否接在安全链上
+    // v2.9.23 (批B B9, 二轮审查两次点名): 本组状态在 executor 回调 (on_ultrasonic/参数回调)
+    //   与融合线程之间共享 —— std::string/time_point 非原子 ⇒ 旧版为数据竞争。
+    //   现: 字符串加锁 (ultra_state_mutex_), 标志/时间戳改原子 (ns 表达, 0=未设)。
+    std::string ultrasonic_requested_ = "auto";   // 用户请求值 (仅构造期写, 之后只读)
+    std::string ultrasonic_source_ = "auto";      // 解析后的实际来源 (受 ultra_state_mutex_ 守护)
+    std::mutex  ultra_state_mutex_;               // B9: 守护 ultrasonic_source_
+    std::atomic<bool>     ultrasonic_enabled_{true};   // 是否接在安全链上
+    std::atomic<bool>     have_ultra_rx_{false};
+    std::atomic<bool>     ultra_ever_rx_{false};       // v2.9.19 (B4): 启动以来收到过首帧
+    std::atomic<int64_t>  last_ultra_rx_ns_{0};        // B9: steady ns (构造时=首帧等待起点)
     bool        allow_simulated_ultrasonic_ = false;
-    int         ultrasonic_timeout_ms_ = 500;
-    bool        have_ultra_rx_ = false;
-    bool        ultra_ever_rx_ = false;        // v2.9.19 (B4): 启动以来收到过首帧
-    bool        topic_wait_warned_ = false;    // v2.9.19 (B4): "5s 无首帧"告警只发一次
-    std::chrono::steady_clock::time_point last_ultra_rx_{};
+    std::atomic<int>      ultrasonic_timeout_ms_{500};
+    bool        topic_wait_warned_ = false;    // v2.9.19 (B4): "5s 无首帧"告警只发一次 (仅融合线程)
+    // v2.9.23 (批B N1): 超声链状态快照 0=off 1=active 2=waiting_first_frame
+    //   (融合线程每轮写; on_timer/publish_terrain 读) —— 供 JSON/status_text/日志透出。
+    std::atomic<int>      ultra_chain_state_{1};
 
     // 深度来源 (v2.4): depth_source=topic 时的订阅与新鲜度状态
     std::string depth_source_ = "auto";
     std::string depth_topic_ = "/camera/depth/image_raw";
     std::string depth_info_topic_ = "/camera/depth/camera_info";
     // v2.9.15: 汇报用小图发布 (1/2 抽点深度; 见 publish_depth_small)
-    bool publish_depth_small_ = true;
+    std::atomic<bool> publish_depth_small_{true};   // N4: 运行期可 set (发布器常驻, 只翻转标志)
     rclcpp::Publisher<sensor_msgs::msg::Image>::SharedPtr depth_small_pub_;
     // T-A3: 地形可视化发布器 (构造期创建 -- 启动坏相机时话题/发布者也必须存在)
     rclcpp::Publisher<sensor_msgs::msg::Image>::SharedPtr terrain_map_pub_;
     rclcpp::Publisher<sensor_msgs::msg::Image>::SharedPtr terrain_grid_pub_;
-    int  depth_timeout_ms_ = 500;
-    bool have_depth_rx_ = false;       // 收到过话题帧 (供超时看门狗判断)
+    std::atomic<int> depth_timeout_ms_{500};   // N4: 运行期可 set
+    // v2.9.23 (批B B9): 深度新鲜度时间戳原子化 (ns; 0=无帧/已失效) —— 旧版
+    //   have_depth_rx_+last_depth_rx_ 两字段被 executor 写/融合线程读, 非原子 ⇒ 竞争。
+    std::atomic<int64_t> last_depth_rx_ns_{0};
+    // v2.9.23 (批B B9): 相机内参跨线程 (on_depth_info 写 / update_perception 读) —— 加锁,
+    //   读侧取快照; 旧版裸 CameraIntrinsics 字段竞争。have_camera_info_ 仅回调内使用。
+    std::mutex camera_info_mutex_;
     bool have_camera_info_ = false;
-    std::chrono::steady_clock::time_point last_depth_rx_{};
     // v2.9.11 分段计时(仅观测用; 跨线程读取, 允许无锁 — 只用于日志)
     double ms_decode_ = 0.0, ms_inject_ = 0.0;      // 主线程
     double ms_gate_ = 0.0, ms_backproj_ = 0.0, ms_to_base_ = 0.0,
@@ -1309,8 +1408,20 @@ private:
         }
     }
 
+    // v2.9.23 (批B N1): 超声链状态 -> 字符串 (供 JSON / 5Hz 日志 / 状态文本)
+    static const char* chain_state_to_str(int s) {
+        switch (s) {
+            case 1:  return "active";               // 超声在安全链上
+            case 2:  return "waiting_first_frame";  // 门窗口 (动作层已被强制 STOP)
+            default: return "off";                  // 不在链上
+        }
+    }
+
     // 融合结果 -> JSON (供 /fusion_result 调试与巡检决策)
-    static std::string fusion_to_json(const FusionResult& r, const VelocityCmd& v) {
+    // v2.9.23 (批B N1): 增 cliff_layer 字段 (active / waiting_first_frame / off) —— 门窗口
+    //   期间消费者可据此得知"当前悬崖保护层不在链上; 动作层已被强制 STOP"。
+    //   (改非 static: 需读 ultra_chain_state_; 调用点 on_timer 为成员函数, 不受影响)
+    std::string fusion_to_json(const FusionResult& r, const VelocityCmd& v) const {
         std::ostringstream oss;
         // P3: 默认 6 位有效数字会把 epoch 秒 (~1.79e9) 截到小时级分辨率 (实测 1.78793e+09);
         //     统一 fixed(3): 时间戳毫秒级, 其余数值字段三位小数 (m/s / rad/s 分辨率足够)
@@ -1320,6 +1431,7 @@ private:
             << ",\"cliff\":" << (r.cliff_detected ? "true" : "false")
             << ",\"degraded\":" << (r.depth_degraded ? "true" : "false")
             << ",\"min_fwd_m\":" << r.min_forward_distance_m
+            << ",\"cliff_layer\":\"" << chain_state_to_str(ultra_chain_state_.load()) << "\""
             << ",\"action\":\"" << action_to_str(r.recommended_action) << "\""
             << ",\"astra_w\":" << r.effective_astra_weight
             << ",\"ultra_w\":" << r.effective_ultrasonic_weight

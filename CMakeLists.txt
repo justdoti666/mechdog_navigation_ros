@@ -22,7 +22,7 @@ endif()
 
 # B17 (v2.9.22): 跨仓版本锁定 —— 断言所吃算法库源码的版本, 防"半批部署/新旧混合"静默漂移
 # 升级纪律: 两仓同批 —— core/version.h 的 PATCH+1 与下方 MECHDOG_CORE_VERSION_REQUIRED 必须一致
-set(MECHDOG_CORE_VERSION_REQUIRED 20922)
+set(MECHDOG_CORE_VERSION_REQUIRED 20923)
 if(NOT EXISTS "${MECHDOG_ALGO_DIR}/version.h")
   message(FATAL_ERROR
     "核心算法库缺少 version.h: ${MECHDOG_ALGO_DIR}\n"
@@ -168,8 +168,11 @@ if(BUILD_TESTING)
   ament_cppcheck(
     src/chassis_bridge.hpp
     src/chassis_bridge_node.cpp
+    src/cmd_vel_watchdog.hpp        # v2.9.23 (批B B12): 上游静默判据 (纯函数)
     src/mapping_demo_node.cpp
+    src/param_policy.hpp            # v2.9.23 (批B N4): 运行期参数白名单 (纯函数)
     src/safety_node.cpp
+    src/safety_ultra_gate.hpp       # v2.9.23 (批B N1): 门窗口动作层策略 (纯函数)
     src/safety_warmup.hpp
     src/sensor_geometry.hpp
     src/ultrasonic_source.hpp
