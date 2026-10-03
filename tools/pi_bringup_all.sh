@@ -4,7 +4,7 @@ export ROS_DOMAIN_ID=42
 source /opt/ros/jazzy/setup.bash 2>/dev/null
 source $HOME/astra_ws/install/setup.bash 2>/dev/null
 source $HOME/mdw_ws/install/setup.bash 2>/dev/null
-echo "== 启动前: camera=$(pgrep -c -f '[a]stra_camera_node' || echo 0) safety=$(pgrep -c -f '[s]afety_node' || echo 0) view=$(pgrep -c -f report_view.py || echo 0)"
+echo "== 启动前: camera=$(pgrep -c -f '[a]stra_camera_node') safety=$(pgrep -c -f '[s]afety_node') view=$(pgrep -c -f report_view.py)"
 # 相机: 无数据才重起
 if ! timeout 6 ros2 topic hz /camera/depth/image_raw 2>&1 | grep -q "average rate"; then
   echo "-> 相机无数据, 重起(红外模式)"
@@ -13,7 +13,7 @@ if ! timeout 6 ros2 topic hz /camera/depth/image_raw 2>&1 | grep -q "average rat
   sleep 34
 fi
 # 节点
-if [ "$(pgrep -c -f '[s]afety_node' || echo 0)" = "0" ]; then
+if ! pgrep -f '[s]afety_node' > /dev/null 2>&1; then
   echo "-> 节点未跑, 启动"
   setsid ros2 run mechdog_navigation_ros safety_node --ros-args \
     -p use_simulated:=false -p depth_source:=topic -p enable_pointcloud:=true \
@@ -23,12 +23,12 @@ if [ "$(pgrep -c -f '[s]afety_node' || echo 0)" = "0" ]; then
   sleep 15
 fi
 # 窗口
-if [ "$(pgrep -c -f report_view.py || echo 0)" = "0" ]; then
+if ! pgrep -f report_view.py > /dev/null 2>&1; then
   echo "-> 窗口未跑, 启动"
   setsid python3 $HOME/pi_report_view.py > $HOME/report_view.log 2>&1 < /dev/null &
   sleep 9
 fi
-echo "== 启动后: camera=$(pgrep -c -f '[a]stra_camera_node' || echo 0) safety=$(pgrep -c -f '[s]afety_node' || echo 0) view=$(pgrep -c -f report_view.py || echo 0)"
+echo "== 启动后: camera=$(pgrep -c -f '[a]stra_camera_node') safety=$(pgrep -c -f '[s]afety_node') view=$(pgrep -c -f report_view.py)"
 echo "-- 话题 --"; for t in /camera/depth/image_raw /camera/ir/image_raw /safety/terrain_map; do
   printf "%-30s " "$t"; timeout 8 ros2 topic hz $t 2>&1 | head -1
 done
