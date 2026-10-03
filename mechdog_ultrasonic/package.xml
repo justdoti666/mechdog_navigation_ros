@@ -11,16 +11,20 @@
 
   <!-- 消息 -->
   <depend>rosidl_default_generators</depend>
-  <member_of_group>rosidl_interface_packages</member_of_group>
 
   <!-- 节点 -->
   <depend>rclcpp</depend>
   <depend>std_msgs</depend>
 
+  <exec_depend>rosidl_default_runtime</exec_depend>
+
   <test_depend>ament_lint_auto</test_depend>
   <test_depend>ament_lint_common</test_depend>
 
-  <exec_depend>rosidl_default_runtime</exec_depend>
+  <!-- N2 (2026-10-03 二轮审查复核): 修正元素顺序 —— member_of_group 必须在全部
+       depend/exec_depend/test_depend 之后、export 之前 (package_format3.xsd;
+       对照官方 std_msgs/rcl_interfaces)。原顺序导致 xmllint 门禁恒红。 -->
+  <member_of_group>rosidl_interface_packages</member_of_group>
 
   <export>
     <build_type>ament_cmake</build_type>
