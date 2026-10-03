@@ -43,15 +43,6 @@ using UltraMsg = mechdog_ultrasonic::msg::UltrasonicArray;
 
 namespace {
 
-// 传感器方向名 (与消息字段 1:1)
-const char* kNames[4] = {"front_left", "front_center", "front_right", "bottom"};
-
-// 时钟: 高精度测 echo 宽度
-double now_sec() {
-    using namespace std::chrono;
-    return duration<double>(steady_clock::now().time_since_epoch()).count();
-}
-
 #ifdef USE_GPIO
 // ---- libgpiod 读一次 HC-SR04 (v1 与 v2 共用封装) ----
 // 返回距离 cm; 超时/失败返回 NaN
