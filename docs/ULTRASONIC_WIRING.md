@@ -83,8 +83,9 @@ GPIO 仅超声使用。）
 3. **分压验证**：上电后量分压点对地 ≈ 3.3V（Echo 静态 0V 正常，触发时才出高）。
 4. **软件验证**（Pi 上）：
    ```bash
-   gpioinfo | grep -E '23|24|17|27|5|6|13|19'   # 确认引脚未被占用
-   ros2 run mechdog_ultrasonic ultrasonic_node --ros-args -p use_gpio:=true
+   gpioinfo | grep -E '23|24|17|27|5|6|13|19'   # 确认引脚未被占用 (gpiod 包提供; chj 在 dialout 组, 无需 sudo)
+   ros2 run mechdog_ultrasonic ultrasonic_node --ros-args -p use_gpio:=true                     # 4 颗全接
+   ros2 run mechdog_ultrasonic ultrasonic_node --ros-args -p use_gpio:=true -p 'active:=[1]'    # 只接正前一颗 (过渡测试)
    ros2 topic echo /ultrasonic                    # 手挡传感器应见距离变化
    ```
 
@@ -93,4 +94,17 @@ GPIO 仅超声使用。）
 - `config.h` layout 顺序 = 消息字段顺序：`front_left → front_center → front_right → bottom`
 - `ultrasonic_node` 默认参数：`trig_pins=[23,17,5,13]`、`echo_pins=[24,27,6,19]`
   （顺序同上，与上表一一对应，**默认值无需改动**）
-- 真机读取走 `USE_GPIO=ON` 编译（libgpiod）；`measure_hcsr04()` 实现尚未补全时节点发无效读数（fail-safe）。
+- 真机读取走 `USE_GPIO=ON` 编译（libgpiod；Ubuntu 24.04 = v1.6.3 ⇒ 默认 v1 路径；v2 系统加 `-DLIBGPIOD_VERSION=v2`）；芯片自动探测（Pi 5 → `rp1` = `/dev/gpiochip4`）；只接部分传感器用 `active` 参数（例 `-p 'active:=[1]'` 只跑正前）。真读失败/超时/超量程一律发无效读数（fail-closed）。
+
+## 附：排针物理定位（Pin 1 在哪端）
+
+单颗/多颗接线前，先把排针方位认对再插杜邦线：
+
+1. **背面方形焊盘**（最稳）：断电翻面，40 个焊点里唯一的方形焊盘 = Pin 1（其余为圆形，行业惯例）。
+2. **正面丝印**：排针外框丝印有一个角是斜角/圆角，最靠近 Pin 1 角。
+3. **方位**：Pin 1 端 = 靠近 USB-C 电源口 / HDMI 那一端；风扇 JST 白插头那一端 = Pin 39/40 端（风扇插座在 40 号脚外侧）。
+4. **数法**：从 Pin 1 沿同一排相邻数：1,3,5,7,9,11,13,15,17 → 第 6 个 = Pin 11、第 7 个 = Pin 13、第 9 个 = Pin 17；对面排正对的分别是 12 / 14 / 18。Pin 2、Pin 4 = 5V（勿接）；Pin 6/9/14/20 等 = GND。
+5. **万用表交叉验证**：上电后 3.3V 出现在 Pin 1 与 Pin 17（两脚相通）；5V = Pin 2 与 Pin 4。
+
+本次单颗接线：VCC→Pin 17、Trig→Pin 11、Echo→Pin 13、GND→Pin 14。
+（来源：Raspberry Pi 官方论坛/文档 方形焊盘惯例；pinout.xyz 官方矢量方位图；官方 GPIO Pinout Diagram。）
