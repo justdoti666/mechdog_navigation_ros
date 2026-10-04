@@ -169,6 +169,7 @@ if(BUILD_TESTING)
     src/chassis_bridge.hpp
     src/chassis_bridge_node.cpp
     src/cmd_vel_watchdog.hpp        # v2.9.23 (批B B12): 上游静默判据 (纯函数)
+    src/lidar_sectors.hpp           # S2 (2026-10-04): 雷达扇区消费 (纯函数, 离线首版)
     src/mapping_demo_node.cpp
     src/param_policy.hpp            # v2.9.23 (批B N4): 运行期参数白名单 (纯函数)
     src/safety_node.cpp
@@ -217,6 +218,13 @@ if(BUILD_TESTING)
   ament_add_gtest(test_chassis_bridge_fault test/test_chassis_bridge_fault.cpp SKIP_LINKING_MAIN_LIBRARIES)
   if(TARGET test_chassis_bridge_fault)
     target_include_directories(test_chassis_bridge_fault PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
+  endif()
+
+  # S2 (2026-10-04): 雷达扇区消费 离线首版 —— scan 帧 → 前向 L/C/R 扇区最小距离
+  # (纯函数, 不接入节点; 接入=行为变化, 须会签)
+  ament_add_gtest(test_lidar_sectors test/test_lidar_sectors.cpp SKIP_LINKING_MAIN_LIBRARIES)
+  if(TARGET test_lidar_sectors)
+    target_include_directories(test_lidar_sectors PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
   endif()
 endif()
 
