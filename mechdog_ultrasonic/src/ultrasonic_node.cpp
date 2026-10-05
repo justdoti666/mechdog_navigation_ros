@@ -205,7 +205,7 @@ private:
         if (!s) return false;
         gpiod_line_settings_set_direction(s, GPIOD_LINE_DIRECTION_OUTPUT);
         gpiod_line_settings_set_output_value(s, GPIOD_LINE_VALUE_INACTIVE);
-        size_t off = trig_off_[i];
+        unsigned off = trig_off_[i];   // U-3: API 需 const unsigned* (size_t* 编译不过)
         struct gpiod_line_config* lc = gpiod_line_config_new();
         if (!lc) { gpiod_line_settings_free(s); return false; }
         bool ok = (gpiod_line_config_add_line_settings(lc, &off, 1, s) == 0);
@@ -227,7 +227,7 @@ private:
         gpiod_line_settings_set_direction(s2, GPIOD_LINE_DIRECTION_INPUT);
         gpiod_line_settings_set_edge_detection(s2, GPIOD_LINE_EDGE_BOTH);
         gpiod_line_settings_set_bias(s2, GPIOD_LINE_BIAS_PULL_DOWN);
-        size_t off2 = echo_off_[i];
+        unsigned off2 = echo_off_[i];  // U-3: 同上
         struct gpiod_line_config* lc2 = gpiod_line_config_new();
         if (!lc2) { gpiod_line_settings_free(s2); return false; }
         ok = (gpiod_line_config_add_line_settings(lc2, &off2, 1, s2) == 0);
