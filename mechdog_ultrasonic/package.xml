@@ -20,6 +20,7 @@
 
   <test_depend>ament_lint_auto</test_depend>
   <test_depend>ament_lint_common</test_depend>
+  <test_depend>ament_cmake_gtest</test_depend>
 
   <!-- N2 (2026-10-03 二轮审查复核): 修正元素顺序 —— member_of_group 必须在全部
        depend/exec_depend/test_depend 之后、export 之前 (package_format3.xsd;

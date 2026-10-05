@@ -36,6 +36,13 @@ target_link_libraries(ultrasonic_node
 )
 target_compile_features(ultrasonic_node PRIVATE cxx_std_20)
 
+# ---- 单测 (U-1, 2026-10-05): publish-mode seam 先红后绿 ----
+if(BUILD_TESTING)
+  find_package(ament_cmake_gtest REQUIRED)
+  ament_add_gtest(test_ultra_publish_mode test/test_ultra_publish_mode.cpp)
+  target_include_directories(test_ultra_publish_mode PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
+endif()
+
 if(USE_GPIO)
   # 树莓派: libgpiod 真读
   find_package(PkgConfig REQUIRED)
