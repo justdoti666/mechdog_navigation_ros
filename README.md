@@ -291,7 +291,7 @@ ros2 topic echo /ultrasonic --once     # 看到 4 颗读数
 ```bash
 # 编译时启用 libgpiod（需树莓派装 libgpiod）
 colcon build --packages-select mechdog_ultrasonic \
-  --cmake-args -DUSE_GPIO=ON [-DLIBGPIOD_VERSION=v2]
+  --cmake-args -DUSE_GPIO=ON [-DMECHDOG_GPIOD_API=auto|v1|v2]
 # 运行（sudo 访问 GPIO）
 sudo ros2 run mechdog_ultrasonic ultrasonic_node \
   --ros-args -p use_gpio:=true

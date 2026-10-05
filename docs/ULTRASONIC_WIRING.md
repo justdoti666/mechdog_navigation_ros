@@ -94,7 +94,7 @@ GPIO 仅超声使用。）
 - `config.h` layout 顺序 = 消息字段顺序：`front_left → front_center → front_right → bottom`
 - `ultrasonic_node` 默认参数：`trig_pins=[23,17,5,13]`、`echo_pins=[24,27,6,19]`
   （顺序同上，与上表一一对应，**默认值无需改动**）
-- 真机读取走 `USE_GPIO=ON` 编译（libgpiod；Ubuntu 24.04 = v1.6.3 ⇒ 默认 v1 路径；v2 系统加 `-DLIBGPIOD_VERSION=v2`）；芯片自动探测（Pi 5 → `rp1` = `/dev/gpiochip4`）；只接部分传感器用 `active` 参数（例 `-p 'active:=[1]'` 只跑正前）。**要求真读时**（`use_gpio:=true`）真读失败/超时/超量程一律发无效读数（fail-closed，不回落模拟；U-1 修复 2026-10-05）；`use_gpio:=false` 才走模拟。
+- 真机读取走 `USE_GPIO=ON` 编译（libgpiod；API 自动判版 —— `-DMECHDOG_GPIOD_API=auto|v1|v2`，默认 auto 按库版本选：24.04 库 1.6.3 走 v1、26.04 库 2.x 走 v2；U-2 修复 2026-10-05）；芯片自动探测（Pi 5 → `rp1` = `/dev/gpiochip4`）；只接部分传感器用 `active` 参数（例 `-p 'active:=[1]'` 只跑正前）。**要求真读时**（`use_gpio:=true`）真读失败/超时/超量程一律发无效读数（fail-closed，不回落模拟；U-1 修复 2026-10-05）；`use_gpio:=false` 才走模拟。
 
 ## 附：排针物理定位（Pin 1 在哪端）
 

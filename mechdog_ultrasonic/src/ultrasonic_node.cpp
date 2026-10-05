@@ -8,7 +8,7 @@
  *   - 默认模拟模式 (WSL/PC 可跑通链路): 生成随机读数 (use_gpio=false)
  *   - use_gpio=true 但 GPIO 不可用 ⇒ 全通道发无效读数 (fail-closed, 绝不回落模拟; U-1, 2026-10-05)
  *   - USE_GPIO=ON (树莓派): libgpiod 真读 Trig/Echo
- *     · Ubuntu 24.04 (Pi 5B) 自带 libgpiod v1.6.3 ⇒ 默认 v1 路径; v2 系统加 -DLIBGPIOD_VERSION=v2
+ *     · libgpiod API 自动判版: 库 <2 走 v1, >=2 走 v2 (开关 -DMECHDOG_GPIOD_API=auto|v1|v2; U-2)
  *     · 芯片自动探测 (gpio_chip:="auto"): label 含 "rp1"(Pi 5) > "bcm"(Pi 4) > /dev/gpiochip4 > /dev/gpiochip0
  *     · 引脚值为 BCM 号 = libgpiod line offset; 5V 供电时 Echo 必须分压到 3.3V (docs/ULTRASONIC_WIRING.md §3)
  *     · chj 在 dialout 组, /dev/gpiochip4 直开, 无需 sudo
