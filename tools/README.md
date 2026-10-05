@@ -60,6 +60,7 @@ python3 ~/pi_replay.py ~/frames_平地 10 1    # 每帧 @10Hz 回放一遍
 |---|---|
 | `pi_gate_test.sh` | 深度质量守门**真机注入回归 v2**（2026-09-29, T6）：造全 0 帧 → 真注入(`pi_replay` 10Hz) → 断言（启动期降级/守门行 valid=0.0%/降级路径）→ PASS/FAIL+退出码；**不依赖相机硬件** |
 | `ultra_gate_check.sh` | **B4 超声启动门回归**（无需硬件）：`silent`/`once` 两种发布者场景，验证 等待首帧 → 重新接入 → 退出安全链 日志序列 |
+| `ultra_failclosed_check.sh` | **U-1 fail-closed 回归**（2026-10-05）：无可用 GPIO 环境起节点（`use_gpio:=true`）→ 断言 `/ultrasonic` 帧内**零** `_valid: true`（拿不到 GPIO 时绝不发模拟随机数）；真机 GPIO 可用时自动 SKIP |
 | `pi_depth_health.py` | 30~60s 深度流健康采样：帧率 / 有效像素占比 / 全零帧 / 坏帧计数 |
 | `pi_window_ab.sh` | **#9 真机验收**：窗口（旧/新）× 节点（`publish_depth_small` 关/开）四相位 CPU 对比 |
 | `pi_pitch_sweep.sh` | 俯仰角扫描（`cloud_pitch_rad` 0/15/25/35°）看 `in_fov` / `cov` / 假坑 |

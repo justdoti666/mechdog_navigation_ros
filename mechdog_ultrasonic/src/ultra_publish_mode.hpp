@@ -12,8 +12,10 @@
  *   AllInvalid —— 全通道发无效读数 (要求真读但拿不到 ⇒ fail-closed, 绝不模拟)
  *   Simulated  —— 显式模拟 (use_gpio=false; PC/WSL 链路默认行为, 不变)
  *
- * ⚠ 先红桩 (本笔): 恒 AllInvalid (最保守 —— 绝不放行可能为假的数据);
- *   功能用例 T1/T2/T6 预期红, fail-closed 用例 T3/T4/T5 绿。实现见下一笔。
+ * 判定 (先红后绿, 2026-10-05 绿笔):
+ *   1) 不要求真读         ⇒ Simulated  (默认行为不变, PC/WSL 链路)
+ *   2) 要求真读但拿不到   ⇒ AllInvalid (fail-closed, 绝不回落模拟随机数)
+ *   3) 要求真读且环境齐备 ⇒ RealGpio
  */
 #pragma once
 
@@ -25,10 +27,9 @@ enum class PublishMode { RealGpio, AllInvalid, Simulated };
 // gpio_compiled : 本二进制是否编入 USE_GPIO
 // chip_open     : gpiochip 是否成功打开 (未编译时传 false)
 inline PublishMode resolve_publish_mode(bool use_gpio, bool gpio_compiled, bool chip_open) {
-    (void)use_gpio;
-    (void)gpio_compiled;
-    (void)chip_open;
-    return PublishMode::AllInvalid;   // 先红桩: 恒最保守
+    if (!use_gpio) return PublishMode::Simulated;                      // 不要求真读 ⇒ 模拟
+    if (!gpio_compiled || !chip_open) return PublishMode::AllInvalid;  // 拿不到   ⇒ fail-closed
+    return PublishMode::RealGpio;
 }
 
 }  // namespace mechdog_ultra

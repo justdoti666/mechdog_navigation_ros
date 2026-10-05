@@ -5,7 +5,8 @@
  *   供 mechdog_navigation_ros 的 safety_node 订阅 (不再由算法库内部直读 GPIO)。
  *
  * 读取:
- *   - 默认模拟模式 (WSL/PC 可跑通链路): 生成随机读数
+ *   - 默认模拟模式 (WSL/PC 可跑通链路): 生成随机读数 (use_gpio=false)
+ *   - use_gpio=true 但 GPIO 不可用 ⇒ 全通道发无效读数 (fail-closed, 绝不回落模拟; U-1, 2026-10-05)
  *   - USE_GPIO=ON (树莓派): libgpiod 真读 Trig/Echo
  *     · Ubuntu 24.04 (Pi 5B) 自带 libgpiod v1.6.3 ⇒ 默认 v1 路径; v2 系统加 -DLIBGPIOD_VERSION=v2
  *     · 芯片自动探测 (gpio_chip:="auto"): label 含 "rp1"(Pi 5) > "bcm"(Pi 4) > /dev/gpiochip4 > /dev/gpiochip0
@@ -37,6 +38,7 @@
 
 #include "rclcpp/rclcpp.hpp"
 #include "mechdog_ultrasonic/msg/ultrasonic_array.hpp"
+#include "ultra_publish_mode.hpp"   // U-1: 发布模式判定 seam (src/ 同目录)
 
 #ifdef USE_GPIO
 #include <gpiod.h>
@@ -174,6 +176,10 @@ public:
         if (!chip_ || i >= (size_t)kMaxChannels || !line_ok_[i]) {
             return std::numeric_limits<double>::quiet_NaN();
         }
+        // U-7: 清掉上一轮"只到上升沿就超时"残留的边沿, 防止吃掉本帧 (v1; v2 由 8 事件缓冲兜底)
+#ifndef LIBGPIOD_V2
+        drain_echo_(i);
+#endif
         // 触发: 低(维持) → 高 kTrigPulseUs → 低
         set_trig_(i, true);
         usleep(kTrigPulseUs);
@@ -281,6 +287,16 @@ private:
         bool is_rise = (ev.event_type == GPIOD_LINE_EVENT_RISING_EDGE);
         return (is_rise == rising);
     }
+
+    // U-7: 零超时排空残留边沿 (v1; 每帧触发前调用, 上限 16 次防死循环)
+    void drain_echo_(size_t i) {
+        struct timespec zero_tmo{0, 0};
+        struct gpiod_line_event ev;
+        for (int guard = 0; guard < 16; ++guard) {
+            if (gpiod_line_event_wait(echo_line_[i], &zero_tmo) != 1) break;
+            if (gpiod_line_event_read(echo_line_[i], &ev) != 0) break;
+        }
+    }
     struct gpiod_line* trig_line_[kMaxChannels] = {};
     struct gpiod_line* echo_line_[kMaxChannels] = {};
 #endif
@@ -335,7 +351,7 @@ public:
             reader_ = std::make_unique<Hcsr04Reader>(trig_pins_, echo_pins_, gpio_chip_);
             if (!reader_->chip_open()) {
                 RCLCPP_ERROR(get_logger(),
-                    "GPIO 初始化失败 (gpio_chip=%s) ⇒ 全部通道发布无效读数 (fail-closed)",
+                    "GPIO 初始化失败 (gpio_chip=%s) ⇒ 全通道发无效读数 (fail-closed, 绝不回落模拟数据)",
                     gpio_chip_.c_str());
             } else {
                 RCLCPP_INFO(get_logger(), "GPIO 真读已启用: chip=%s label='%s' (active=%zu 路)",
@@ -346,7 +362,8 @@ public:
 #else
         if (use_gpio_) {
             RCLCPP_WARN(get_logger(),
-                "本构建未启用 USE_GPIO (需 colcon --cmake-args -DUSE_GPIO=ON), use_gpio 被忽略, 走模拟");
+                "本构建未启用 USE_GPIO (需 colcon --cmake-args -DUSE_GPIO=ON) ⇒ 拿不到真读, "
+                "全通道将发无效读数 (fail-closed, 不回落模拟)");
         }
 #endif
 
@@ -359,7 +376,15 @@ private:
         UltraMsg msg;
         msg.stamp = get_clock()->now();
         msg.seq = seq_++;
-        msg.period_sec = static_cast<float>(1.0 / std::max(rate_hz_, 1.0));
+        // U-7: period_sec 用实测发布间隔 (首帧退化为标称周期)
+        const auto now_tp = std::chrono::steady_clock::now();
+        double period = 1.0 / std::max(rate_hz_, 1.0);
+        if (have_last_pub_) {
+            period = std::chrono::duration<double>(now_tp - last_pub_).count();
+        }
+        last_pub_ = now_tp;
+        have_last_pub_ = true;
+        msg.period_sec = static_cast<float>(period);
 
         // 初值: 全部无效 (fail-closed; 接入的通道在下面逐路覆盖)
         msg.front_left_cm = msg.front_center_cm = msg.front_right_cm = msg.bottom_cm =
@@ -372,9 +397,20 @@ private:
         const std::array<bool*, kMaxChannels> val{
             &msg.front_left_valid, &msg.front_center_valid, &msg.front_right_valid, &msg.bottom_valid};
 
+        // U-1: 三态判定 —— 真读 / 全无效(fail-closed) / 显式模拟 (见 ultra_publish_mode.hpp)
+        const auto mode = mechdog_ultra::resolve_publish_mode(
+            use_gpio_,
+#ifdef USE_GPIO
+            true,
+            (reader_ != nullptr) && reader_->chip_open()
+#else
+            false, false
+#endif
+        );
+
         bool real = false;
 #ifdef USE_GPIO
-        if (use_gpio_ && reader_ && reader_->chip_open()) {
+        if (mode == mechdog_ultra::PublishMode::RealGpio) {
             real = true;
             size_t fail = 0;
             for (int i : active_idx_) {
@@ -393,8 +429,12 @@ private:
             }
         }
 #endif
-        if (!real) {
+        if (mode == mechdog_ultra::PublishMode::Simulated) {
             simulate(&msg);
+        } else if (mode == mechdog_ultra::PublishMode::AllInvalid && !real) {
+            RCLCPP_ERROR_THROTTLE(get_logger(), *get_clock(), 5000,
+                "要求真读(use_gpio=true)但 GPIO 不可用 ⇒ 全通道发无效读数 "
+                "(fail-closed, 绝不回落模拟数据)");
         }
 
         pub_->publish(msg);
@@ -430,6 +470,9 @@ private:
     std::unique_ptr<Hcsr04Reader> reader_;
 #endif
     std::mt19937 gen_{static_cast<unsigned>(std::random_device{}())};
+    // U-7: 上一帧发布时刻 (period_sec 实测口径)
+    std::chrono::steady_clock::time_point last_pub_{};
+    bool have_last_pub_ = false;
 };
 
 int main(int argc, char** argv) {
