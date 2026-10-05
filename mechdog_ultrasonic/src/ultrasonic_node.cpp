@@ -157,8 +157,9 @@ public:
 
     ~Hcsr04Reader() {
 #ifdef LIBGPIOD_V2
-        if (echo_req_) gpiod_line_request_release(echo_req_);
-        if (trig_req_) gpiod_line_request_release(trig_req_);
+        // U-3: 逐路 request, 数组化释放
+        for (auto* r : echo_req_) if (r) gpiod_line_request_release(r);
+        for (auto* r : trig_req_) if (r) gpiod_line_request_release(r);
         if (ev_buf_)   gpiod_edge_event_buffer_free(ev_buf_);
 #else
         for (auto* l : echo_line_) if (l) gpiod_line_release(l);
@@ -212,8 +213,8 @@ private:
         if (!rc) { gpiod_line_config_free(lc); gpiod_line_settings_free(s); return false; }
         gpiod_request_config_set_consumer(rc, "ultrasonic_node");
         if (ok) {
-            trig_req_ = gpiod_chip_request_lines(chip_, rc, lc);
-            ok = (trig_req_ != nullptr);
+            trig_req_[i] = gpiod_chip_request_lines(chip_, rc, lc);   // U-3: 逐路, 不覆盖别路
+            ok = (trig_req_[i] != nullptr);
         }
         gpiod_request_config_free(rc);
         gpiod_line_config_free(lc);
@@ -234,30 +235,34 @@ private:
         if (!rc2) { gpiod_line_config_free(lc2); gpiod_line_settings_free(s2); return false; }
         gpiod_request_config_set_consumer(rc2, "ultrasonic_node");
         if (ok) {
-            echo_req_ = gpiod_chip_request_lines(chip_, rc2, lc2);
-            ok = (echo_req_ != nullptr);
+            echo_req_[i] = gpiod_chip_request_lines(chip_, rc2, lc2);  // U-3: 逐路, 不覆盖别路
+            ok = (echo_req_[i] != nullptr);
         }
         gpiod_request_config_free(rc2);
         gpiod_line_config_free(lc2);
         gpiod_line_settings_free(s2);
-        if (!ok) return false;
+        if (!ok) {
+            // U-3: echo 拿不到时, 把本路已占的 trig 让出来 (别路不受影响)
+            if (trig_req_[i]) { gpiod_line_request_release(trig_req_[i]); trig_req_[i] = nullptr; }
+            return false;
+        }
         if (!ev_buf_) ev_buf_ = gpiod_edge_event_buffer_new(8);
         return ev_buf_ != nullptr;
     }
 
     void set_trig_(size_t i, bool high) {
-        if (trig_req_) {
-            gpiod_line_request_set_value(trig_req_, trig_off_[i],
+        if (trig_req_[i]) {
+            gpiod_line_request_set_value(trig_req_[i], trig_off_[i],
                 high ? GPIOD_LINE_VALUE_ACTIVE : GPIOD_LINE_VALUE_INACTIVE);
         }
     }
 
     bool wait_edge_(size_t i, bool rising, uint64_t& ts_ns) {
-        if (!echo_req_ || !ev_buf_) return false;
+        if (!echo_req_[i] || !ev_buf_) return false;
         long tmo_ns = (long)kEchoTimeoutMs * 1000 * 1000;
-        int rc = gpiod_line_request_wait_edge_events(echo_req_, tmo_ns);
+        int rc = gpiod_line_request_wait_edge_events(echo_req_[i], tmo_ns);
         if (rc <= 0) return false;
-        int nev = gpiod_line_request_read_edge_events(echo_req_, ev_buf_, 8);
+        int nev = gpiod_line_request_read_edge_events(echo_req_[i], ev_buf_, 8);
         if (nev <= 0) return false;
         for (int k = 0; k < nev; ++k) {
             struct gpiod_edge_event* ev = gpiod_edge_event_buffer_get_event(ev_buf_, (unsigned long)k);
@@ -308,8 +313,9 @@ private:
     unsigned trig_off_[kMaxChannels] = {};
     unsigned echo_off_[kMaxChannels] = {};
 #ifdef LIBGPIOD_V2
-    struct gpiod_line_request* trig_req_ = nullptr;
-    struct gpiod_line_request* echo_req_ = nullptr;
+    // U-3: 每路独立 request (原单成员被后一路覆盖 ⇒ 多路时仅末路可动, 其余全超时)
+    struct gpiod_line_request* trig_req_[kMaxChannels] = {};
+    struct gpiod_line_request* echo_req_[kMaxChannels] = {};
     struct gpiod_edge_event_buffer* ev_buf_ = nullptr;
 #endif
 };
