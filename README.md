@@ -2,7 +2,7 @@
 
 将 `mechdog_navigation` 纯算法库（SensorFusion + PathPlanner）封装为 ROS2 节点，作为机械狗巡检的**局部安全层**，与 `quadruped_ws` 全局栈（Nav2 + 激光雷达 + AMCL + 栅格地图 + 安全闸门 + STM32 底盘桥）通过话题对接，构成完整的三库系统。
 
-> **真机状态（2026-09-25）**：已在 Pi 5B（Ubuntu 24.04 + Jazzy + Astra Pro）跑通 —— 深度订阅 ≈30Hz、控制路径端到端 **≈34ms**（不过网络；证据 `docs/PERF_TIMING_EVIDENCE.md`）；上位机/远程接口用 `/safety/terrain_grid`（4848 B/帧 ≈ **0.39 Mbit/s**，2.4GHz 弱网可传）。当前版本 **v2.9.20**。
+> **真机状态（2026-09-25）**：已在 Pi 5B（Ubuntu 24.04 + Jazzy + Astra Pro）跑通 —— 深度订阅 ≈30Hz、控制路径端到端 **≈34ms**（不过网络；证据 `docs/PERF_TIMING_EVIDENCE.md`）；上位机/远程接口用 `/safety/terrain_grid`（4848 B/帧 ≈ **0.39 Mbit/s**，2.4GHz 弱网可传）。当前代码版本 **v2.9.23**。
 
 ## 三库架构总览
 
@@ -297,7 +297,9 @@ sudo ros2 run mechdog_ultrasonic ultrasonic_node \
   --ros-args -p use_gpio:=true
 ```
 
-> ⚠️ **接线注意**：HC-SR04 是 5V 电平，树莓派 GPIO 3.3V——Echo 回波必须**电平转换(分压)**，否则可能损坏树莓派。引脚用 ROS 参数 `trig_pins`/`echo_pins`（默认 `[23,17,5,13]`/`[24,27,6,19]`，**BCM GPIO 号**=libgpiod line offset，物理排针号见 `docs/ULTRASONIC_WIRING.md`）。**本路由为备选：主路径接线已在 STM32 侧固化**（STM32 同样 3.3V 逻辑，Echo 分压电路一致）。
+> ⚠️ **接线注意**：HC-SR04 是 5V 电平，树莓派 GPIO 3.3V——Echo 回波必须**电平转换(分压)**，否则可能损坏树莓派。引脚用 ROS 参数 `trig_pins`/`echo_pins`（默认 `[23,17,5,13]`/`[24,27,6,19]`，**BCM GPIO 号**=libgpiod line offset，物理排针号见 `docs/ULTRASONIC_WIRING.md`）。**本路由为备选：主路径接线已在 STM32 侧固化**（STM32 同样 3.3V 逻辑，Echo 分压电路一致）。台架 3.3V 直连过渡接法（免分压、量程缩水）与正式 5V 口径见 `docs/ULTRASONIC_WIRING.md` 附2。
+
+> **GPIO 不可用 = fail-closed（U-1，2026-10-05）**：`use_gpio:=true` 但 GPIO 不可用（未编 `USE_GPIO` / 打不开 gpiochip）⇒ **全通道发无效读数（NaN + `valid=false`），绝不回落模拟随机数**（修复前会静默发模拟值、可能混入安全链），日志节流 ERROR；模拟数据只在 `use_gpio:=false`（默认）时发布。`MECHDOG_GPIOD_API=auto|v1|v2`：`auto` 按 libgpiod 版本自动判版（≥2 走 v2 逐路独立请求，U-3）；显式 `v2` 配 v1 库 ⇒ **configure 期 FATAL**（不静默落回；旧名兼容仅告警）。
 
 ### 子包内容
 
@@ -328,7 +330,8 @@ Pi 上真机运行/汇报用的一组脚本（实时窗口、抓帧取证、离�
 - [x] v2.9.21 修复批（离线）：地形话题全时可用〔T-A3〕/ 参数回调〔T-A2b〕/ NaN·inf 消毒〔T-B3〕/ 降级限速硬上限〔T-A2a〕/ 控制开关原子化〔T-A1〕/ 底盘桥故障语义〔T-B4〕/ 部署全量同步〔T-B1〕/ 深度探针 step 修复〔T-C2〕；双平台离线全绿，未上真机
 - [x] 地面提取双路径 + cell 跳过 RANSAC（v2.9.16：精度 0.98°/1.39° → 0.02°）
 - [x] 汇报窗口工具（tools/：实时窗口 + 抓帧/回放 + A/B 脚本）
-- [ ] 真机超声波（HC-SR04 实机数据 = STM32 0x02 上报经桥节点补丁 → /ultrasonic，**待师兄固件+桥补丁落地**；备选本包 GPIO 路径）
+- [x] 超声修复批 U-1~U-7（2026-10-05，离线全绿）：`use_gpio` 不可用 ⇒ fail-closed 全通道无效（先红后绿 6/6；运行时工装 0×`valid=true`）；GPIO 开关 `MECHDOG_GPIOD_API`（auto 判版 / 显式矛盾 FATAL）；v2 路径逐路 request（**首次真编**：26.04 + libgpiod 2.2.1）；取证工装 `ultra_failclosed_check.sh`・`ultra_capture.sh`；文档口径（3.3V 台架过渡 / 单颗 ⇒ 永久 STOP）→ `docs/ULTRASONIC_WIRING.md`
+- [ ] 真机超声波（HC-SR04 实机数据 = STM32 0x02 上报经桥节点补丁 → /ultrasonic，**待师兄固件+桥补丁落地**；备选本包 GPIO 路径：单颗真读已跑通〔2026-10-04〕，四路 + U 批行为复验待上机，取证用 `tools/ultra_capture.sh`）
 - [ ] Stm32ChassisBridge 串口实机联调（协议已实现, 待硬件验证）
 - [ ] 建图真机化（Astra 真深度替换合成帧 + 真底盘 odom 位姿；Windows 侧静止/旋转扫描已由算法库 `tools/mapping_real_test` 验证）
 - [ ] 真机部署前：确认前向全盲 `SLOW_FORWARD` 策略与全局闸门的兜底关系（mechdog_navigation README「已知限制」#7）
