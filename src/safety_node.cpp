@@ -505,6 +505,13 @@ public:
                     have_result_ = true;
                     last_fusion_update_ = std::chrono::steady_clock::now();
                 }
+                // A (v2.9.24): 隐身障碍可疑 → 快照 (状态文本/排查用; 纯观测, 不改动作)
+                hidden_suspect_.store(result.hidden_obstacle_suspect);
+                hidden_dir_code_.store(
+                    result.hidden_obstacle_dir == "left"   ? 1 :
+                    result.hidden_obstacle_dir == "center" ? 2 :
+                    result.hidden_obstacle_dir == "right"  ? 3 : 0);
+                hidden_dist_m_.store(result.hidden_obstacle_dist_m);
                 // 近场感知: **每轮都更新** (与是否发布点云解耦) —— 路1 的避坑决策要靠它;
                 // 原来只在 cloud_pub_ 存在时才跑分割, 会让"避坑"静默依赖可视化开关。
                 const auto tU0 = std::chrono::steady_clock::now();
@@ -944,6 +951,14 @@ private:
         if (ultra_chain_state_.load() == 2) {   // v2.9.23 (批B N1): 门窗口显式披露 (动作层=STOP)
             s.data += "  |  超声未接入(等待首帧): 本段无悬崖保护, 动作层=STOP (fail-closed)";
         }
+        if (hidden_suspect_.load()) {   // A (v2.9.24): 隐身障碍可疑 (超声有/深度无; 纯观测, 不改动作)
+            const int hd = hidden_dir_code_.load();
+            char h2[176];
+            std::snprintf(h2, sizeof(h2),
+                "  |  疑似隐身障碍(镜面/透明): %s@%.2fm — 超声有回波、深度同方位无对应障碍 (纯观测)",
+                hd == 1 ? "左" : hd == 2 ? "正前" : hd == 3 ? "右" : "?", hidden_dist_m_.load());
+            s.data += h2;
+        }
         status_text_pub_->publish(s);
     }
 
@@ -1235,6 +1250,12 @@ private:
                 scan_n, result.depth_degraded ? "YES" : "no",
                 chain_state_to_str(ultra_chain_state_.load()));   // v2.9.23 (批B N1): 超声链状态
         }
+        // A (v2.9.24): 隐身障碍可疑 —— 独立 WARN (2s 节流; 纯观测, 不改动作; 供现场排查)
+        if (fresh && result.hidden_obstacle_suspect) {
+            RCLCPP_WARN_THROTTLE(this->get_logger(), *this->get_clock(), 2000,
+                "A: 疑似隐身障碍(镜面/透明) %s@%.2fm — 超声有回波、深度同方位无对应障碍 (纯观测)",
+                result.hidden_obstacle_dir.c_str(), result.hidden_obstacle_dist_m);
+        }
     }
 
     // 算法库成员
@@ -1322,6 +1343,12 @@ private:
     int     depth_bad_streak_   = 0;      // 当前连续坏帧轮数 (好帧清零)
     double  depth_bad_t0_       = 0.0;    // 本段坏帧起始时刻 (秒)
     std::atomic<bool> depth_degraded_{false};   // 是否已上报"降级" (T-A1/T-A2b: executor 参数回调读 -> 原子)
+    // A (v2.9.24): 隐身障碍 (镜面/透明) 可疑快照 —— 融合线程每轮写 (来自 fuse 结果),
+    //   publish_terrain 状态文本 / on_timer 日志读 (与 ultra_chain_state_ 同模式);
+    //   纯观测, 不参与任何决策 (行为挂接待会签)。
+    std::atomic<bool>   hidden_suspect_{false};
+    std::atomic<int>    hidden_dir_code_{0};   // 0=无 1=left 2=center 3=right
+    std::atomic<double> hidden_dist_m_{0.0};
     bool    depth_ever_good_    = false;  // 是否见过好帧 (v2.9.18 N9: 启动期也计数, 仅门槛提高)
     int     depth_last_reason_  = -1;     // 最近一次原因: 0=无帧 1=质量守门 2=点云为空
     double  last_degraded_status_s_ = -1e9;  // 上次主动发降级文案的时刻 (1Hz 节流)
@@ -1430,6 +1457,9 @@ private:
             << ",\"environment\":\"" << env_to_str(r.environment) << "\""
             << ",\"cliff\":" << (r.cliff_detected ? "true" : "false")
             << ",\"degraded\":" << (r.depth_degraded ? "true" : "false")
+            << ",\"hidden_obstacle\":" << (r.hidden_obstacle_suspect ? "true" : "false")
+            << ",\"hidden_dir\":\"" << r.hidden_obstacle_dir << "\""
+            << ",\"hidden_dist_m\":" << r.hidden_obstacle_dist_m
             << ",\"min_fwd_m\":" << r.min_forward_distance_m
             << ",\"cliff_layer\":\"" << chain_state_to_str(ultra_chain_state_.load()) << "\""
             << ",\"action\":\"" << action_to_str(r.recommended_action) << "\""
