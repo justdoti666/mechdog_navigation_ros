@@ -314,6 +314,8 @@ private:
     unsigned echo_off_[kMaxChannels] = {};
 #ifdef LIBGPIOD_V2
     // U-3: 每路独立 request (原单成员被后一路覆盖 ⇒ 多路时仅末路可动, 其余全超时)
+    //   [R-1 追溯·2026-10-11 复核] 数组化实体落于提交 **b085375** (其提交信息只讲 rclpy 直捕);
+    //   声称修 U-3 的 babd0f8 实际仅改 2 行 (off→unsigned)。摘拣/回滚 U-3 时以 b085375 为准。
     struct gpiod_line_request* trig_req_[kMaxChannels] = {};
     struct gpiod_line_request* echo_req_[kMaxChannels] = {};
     struct gpiod_edge_event_buffer* ev_buf_ = nullptr;

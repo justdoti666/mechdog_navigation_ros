@@ -15,14 +15,16 @@ LOG=/tmp/ultra_failclosed_node.log
 FRAME=/tmp/ultra_failclosed_frame.txt
 : > "$LOG"; : > "$FRAME"
 
-ros2 run mechdog_ultrasonic ultrasonic_node --ros-args -p use_gpio:=true > "$LOG" 2>&1 &
+# R-11 (2026-10-11 复核) 修复史: 原全域 `pkill -9 -x ultrasonic_node` 会误杀同机其它实验/别人的
+#   同名节点 ⇒ 先改为"只杀本 PID"; 但实测 (WSL) `ros2 run` 包装进程被杀后**节点成孤儿存活**
+#   (PGID≠节点 PID) ⇒ 维持"只杀自己的"原则, 改用 setsid 开**独立进程组**、收尾杀整组
+#   (组内只含本工装进程, 不碰同机其它节点)。
+setsid ros2 run mechdog_ultrasonic ultrasonic_node --ros-args -p use_gpio:=true > "$LOG" 2>&1 &
 PID=$!
-# R-11 (2026-10-11 复核): 只杀**本工装起的** PID —— 原 `pkill -9 -x ultrasonic_node` 会连
-#   真机同场其他实验/别人起的同名节点一起杀掉 (同机多实验有误杀风险)。
-trap 'kill -9 "$PID" 2>/dev/null' EXIT
+trap 'kill -9 -- "-$PID" 2>/dev/null' EXIT
 sleep 6
 timeout 12 python3 "$SCRIPT_DIR/ultra_frame_capture.py" > "$FRAME" 2>&1
-kill -9 "$PID" 2>/dev/null; wait "$PID" 2>/dev/null
+kill -9 -- "-$PID" 2>/dev/null; kill -9 "$PID" 2>/dev/null; wait "$PID" 2>/dev/null
 
 if grep -q "真读已启用" "$LOG"; then
   echo "SKIP: 本机 GPIO 可用 (节点日志: 真读已启用) —— 本工装只判「拿不到 GPIO」的 fail-closed 路径"
