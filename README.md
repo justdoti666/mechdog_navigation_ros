@@ -301,6 +301,8 @@ sudo ros2 run mechdog_ultrasonic ultrasonic_node \
 
 > **GPIO 不可用 = fail-closed（U-1，2026-10-05）**：`use_gpio:=true` 但 GPIO 不可用（未编 `USE_GPIO` / 打不开 gpiochip）⇒ **全通道发无效读数（NaN + `valid=false`），绝不回落模拟随机数**（修复前会静默发模拟值、可能混入安全链），日志节流 ERROR；模拟数据只在 `use_gpio:=false`（默认）时发布。`MECHDOG_GPIOD_API=auto|v1|v2`：`auto` 按 libgpiod 版本自动判版（≥2 走 v2 逐路独立请求，U-3）；显式 `v2` 配 v1 库 ⇒ **configure 期 FATAL**（不静默落回；旧名兼容仅告警）。
 
+> ⚠️ **"忘传 use_gpio" 是残留风险（R-2，2026-10-11 复核）**：节点默认 `use_gpio:=false`，此时它发布的是**模拟随机数且 `valid=true`**，而 `UltrasonicArray` 消息里**没有"来源=模拟"字段** ⇒ `safety_node` 的来源解析与 `allow_simulated_ultrasonic` **认不出对面是模拟器**（与历史 B4/附B 同源）。现已在模拟分支加**节流 WARN**（"正在发布模拟随机数…不得接入安全链"），并新增 `tools/pi_start_ultrasonic.sh`（真机启动**显式带** `use_gpio:=true`）。根治方案（消息加 `simulated` 标记 + 下游拒收）待定。
+
 ### 子包内容
 
 | 文件 | 作用 |

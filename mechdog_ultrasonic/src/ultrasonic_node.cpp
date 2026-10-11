@@ -437,6 +437,12 @@ private:
 #endif
         if (mode == mechdog_ultra::PublishMode::Simulated) {
             simulate(&msg);
+            // R-2 (2026-10-11 复核): "忘传 use_gpio:=true" 是最可能的误用路径 —— 必须当场可见。
+            //   消息里没有"来源=模拟"标记字段 ⇒ 下游 (safety_node 来源解析 / allow_simulated_ultrasonic)
+            //   认不出对面是模拟器, 只能靠这条 WARN 让人发现 (真机请 use_gpio:=true 或走 STM32 桥)。
+            RCLCPP_WARN_THROTTLE(get_logger(), *get_clock(), 5000,
+                "本节点正在发布**模拟随机数** (use_gpio:=false / 未传该参数) ⇒ **不得接入安全链**; "
+                "真机请传 -p use_gpio:=true (Pi GPIO 读) 或由 STM32 桥发布 /ultrasonic");
         } else if (mode == mechdog_ultra::PublishMode::AllInvalid && !real) {
             RCLCPP_ERROR_THROTTLE(get_logger(), *get_clock(), 5000,
                 "要求真读(use_gpio=true)但 GPIO 不可用 ⇒ 全通道发无效读数 "

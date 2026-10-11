@@ -86,8 +86,9 @@ GPIO 仅超声使用。）
 4. **软件验证**（Pi 上）：
    ```bash
    gpioinfo | grep -E '23|24|17|27|5|6|13|19'   # 确认引脚未被占用 (gpiod 包提供; chj 在 dialout 组, 无需 sudo)
-   ros2 run mechdog_ultrasonic ultrasonic_node --ros-args -p use_gpio:=true                     # 4 颗全接
-   ros2 run mechdog_ultrasonic ultrasonic_node --ros-args -p use_gpio:=true -p 'active:=[1]'    # 只接正前一颗 (过渡测试)
+   bash tools/pi_start_ultrasonic.sh                                                            # 4 颗全接（R-2 推荐：显式带 use_gpio:=true）
+   ACTIVE=1 bash tools/pi_start_ultrasonic.sh                                                   # 只接正前一颗 (过渡测试)
+   ros2 run mechdog_ultrasonic ultrasonic_node --ros-args -p use_gpio:=true                     # 等价的手敲写法（别漏 -p，否则发的是模拟随机数）
    ros2 topic echo /ultrasonic                    # 手挡传感器应见距离变化
    ```
 
@@ -122,5 +123,5 @@ GPIO 仅超声使用。）
 台架单颗（正前）验证用 **3V3 直供**：VCC→Pin 17、Trig→Pin 11、Echo→Pin 13、GND→Pin 14。
 
 - 为什么：3V3 供电时 Echo 高电平 ≈3.3V，**免分压器直连 GPIO**——单颗台架最快接法（U-4：与 §2「VCC 必须 5V」的表面冲突在此说清）；
-- 代价：HC-SR04 标称 5V 供电，3V3 下**量程缩水、回波余量小**（有效距离明显变短）；
+- 代价：HC-SR04 标称 5V 供电，3V3 下**量程缩水、回波余量小**（有效距离明显变短）；**个别模块 3V3 下完全无回波**（表现为该路一直 `nan`）——R-11（2026-10-11 复核）: 此时 `ultra_failclosed_check.sh` **照样 PASS**（全无效 = fail-closed 的正确行为），所以 PASS **不等于**"接线对了"，要另看 `ultra_capture.sh` 的帧里有没有有效读数；
 - 身份：**仅过渡/台架**。正式装机回到 §2（5V 供电）+ §3（Echo 分压）。

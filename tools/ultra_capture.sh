@@ -13,7 +13,14 @@
 # 例:   bash ultra_capture.sh ~/ev/20261005_u1 5 auto
 set -uo pipefail
 SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
-OUT="${1:?用法: ultra_capture.sh <输出目录> [帧数=5] [日志来源 auto|<路径>]}"
+# R-7 (2026-10-11 复核): 原写法 OUT="${1:?用法…}" 在 bash 下的退出码是 **127**（不是文档写的 2），
+#   调用方按"2 = 用法错"分支处理会误判 ⇒ 改成显式检查 + exit 2（与脚本头声明一致）。
+if [ "$#" -lt 1 ]; then
+  echo "用法: bash ultra_capture.sh <输出目录> [帧数=5] [日志来源 auto|<路径>]" >&2
+  echo "  例: bash ultra_capture.sh ~/ev/20261005_u1 5 auto" >&2
+  exit 2
+fi
+OUT="$1"
 N="${2:-5}"
 LOG_SRC="${3:-auto}"
 mkdir -p "$OUT"

@@ -182,6 +182,14 @@ if(BUILD_TESTING)
     tools/mount_calib.cpp
   )
   set_tests_properties(cppcheck PROPERTIES ENVIRONMENT "AMENT_CPPCHECK_ALLOW_SLOW_VERSIONS=1")
+  # R-3 复核更正 (2026-10-11, 实测):
+  #   有报告怀疑"GPIO 段(#ifdef USE_GPIO / LIBGPIOD_V2)不在 cppcheck 范围内, 因为没有传 -D"。
+  #   实测 (cppcheck 2.13.0): **cppcheck 默认会自己枚举 #ifdef 配置** —— 直接跑
+  #     cppcheck --enable=warning --std=c++20 mechdog_ultrasonic/src/ultrasonic_node.cpp
+  #   输出即为 `Checking …: LIBGPIOD_V2;USE_GPIO...` / `Checking …: USE_GPIO...`
+  #   ⇒ GPIO 的 v1/v2 两版**本来就被分析**。
+  #   故**不要**给它传 -DUSE_GPIO/-DLIBGPIOD_V2: 显式宏只剩单一配置, 覆盖面反而更窄
+  #   (ament_cppcheck 宏也不支持 ARGS 透传)。要更强保证请另加"v2 编译烟测"(26.04 + libgpiod 2.x)。
   find_package(ament_cmake_lint_cmake REQUIRED)
   ament_lint_cmake()
   find_package(ament_cmake_xmllint REQUIRED)
