@@ -129,7 +129,7 @@ ros2 run mechdog_ultrasonic ultrasonic_node
 - **v2.9.23 修复批（批B 行为项）**：① **N1 门窗口动作层=STOP**（超声 source=topic 首帧未到期间，修复前实测照走 FORWARD 0.06→0.12 m/s；现强制 STOP，且 `/fusion_result`、`/safety/status_text`、5Hz 日志透出 `cliff_layer=waiting_first_frame`）；② **B12 残：chassis_bridge_node 上游看门狗**（`cmd_vel_timeout_ms` 默认 500ms，见上）；③ **N4 运行期参数白名单**（`ros2 param set` 仅白名单即时生效，其余明确拒绝，见「参数一览」注）；④ **B9 跨线程状态原子化/加锁**（超声链路状态、深度新鲜度、相机内参 —— 旧报告两次点名项）。版本 v2.9.22→v2.9.23（两仓同批）。
 - **前向全盲行为（接真机前必读）**：算法库在前向三方向全部失效（镜头被挡 + 三颗前向超声全坏）时输出 `SLOW_FORWARD` 降速盲行（仅 bottom 悬崖兜底），**不是 STOP**。接机械狗前务必与师兄闸门确认该场景有叠加保护；若本层是最后防线，按 mechdog_navigation README「已知限制」#7 把该分支改为 `STOP`。
 
-## 参数一览（safety_node，共 33 个）
+## 参数一览（safety_node，共 34 个）
 
 启动期 `--ros-args -p <名>:=<值>` 均可改；**运行期 `ros2 param set` 仅白名单参数即时生效**（`degraded_policy` / `depth_bad_streak_n` / `depth_timeout_ms` / `ultrasonic_timeout_ms` / `publish_depth_small` / `grid_wedge_only` / `cloud_downsample_step`），其余参数会被**明确拒绝**并在 reason 说明（v2.9.23 批B N4：不再"静默成功但无效"）。标 ★ 的另有 launch 透传（`xxx:=值`）。
 
@@ -142,6 +142,7 @@ ros2 run mechdog_ultrasonic ultrasonic_node
 | | `ultrasonic_source`★ | auto | auto / topic / hardware / simulated（仅台架）/ none |
 | | `allow_simulated_ultrasonic`★ | false | 真机模式把模拟超声接进安全链（默认拒绝，防假悬崖） |
 | | `ultrasonic_timeout_ms`★ | 500 | 超声话题超时 ⇒ 超声移出安全链 |
+| | `relax_missing_bottom` | false | **U-5 过渡期放宽**（2026-10-13，启动期参数）：true = 缺/无效底部读数**不再判坠**（仅"有效读数>30cm"才判悬崖）——**仅台架，装机禁开**；不入运行期白名单（`param set` 会被拒绝） |
 | | `warmup_ms` | 250 | 启动预热：等底部超声就绪后再跑首轮融合（防首帧假 STOP；有界超时兜底） |
 | 相机几何 / 地面先验 | `cloud_x`★ / `cloud_z`★ | 0.12 / 0.18 | 相机相对 base_link 位置（m，装机量测） |
 | | `cloud_pitch_rad`★ | 节点 0.2618（15°）/ launch 0.0 | 相机俯仰（rad）——launch 默认 0.0 跟随台架实装，装机量测后改 |
@@ -302,6 +303,13 @@ sudo ros2 run mechdog_ultrasonic ultrasonic_node \
 > **GPIO 不可用 = fail-closed（U-1，2026-10-05）**：`use_gpio:=true` 但 GPIO 不可用（未编 `USE_GPIO` / 打不开 gpiochip）⇒ **全通道发无效读数（NaN + `valid=false`），绝不回落模拟随机数**（修复前会静默发模拟值、可能混入安全链），日志节流 ERROR；模拟数据只在 `use_gpio:=false`（默认）时发布。`MECHDOG_GPIOD_API=auto|v1|v2`：`auto` 按 libgpiod 版本自动判版（≥2 走 v2 逐路独立请求，U-3）；显式 `v2` 配 v1 库 ⇒ **configure 期 FATAL**（不静默落回；旧名兼容仅告警）。
 
 > ⚠️ **"忘传 use_gpio" 是残留风险（R-2，2026-10-11 复核）**：节点默认 `use_gpio:=false`，此时它发布的是**模拟随机数且 `valid=true`**，而 `UltrasonicArray` 消息里**没有"来源=模拟"字段** ⇒ `safety_node` 的来源解析与 `allow_simulated_ultrasonic` **认不出对面是模拟器**（与历史 B4/附B 同源）。现已在模拟分支加**节流 WARN**（"正在发布模拟随机数…不得接入安全链"），并新增 `tools/pi_start_ultrasonic.sh`（真机启动**显式带** `use_gpio:=true`）。根治方案（消息加 `simulated` 标记 + 下游拒收）待定。
+
+> **过渡期底部放宽（U-5，2026-10-13 落地）**：台架只接部分超声（如单颗、无底部）时，"缺底部"按 fail-closed 判坠 ⇒ safety_node 下**永久 STOP**。现提供**启动期参数 `relax_missing_bottom`（默认 false = 严格）**，过渡期整机行走调试时显式开启：
+> ```bash
+> ros2 launch mechdog_navigation_ros safety.launch.py use_simulated:=false relax_missing_bottom:=true
+> # 或 ros2 run mechdog_navigation_ros safety_node --ros-args -p relax_missing_bottom:=true
+> ```
+> 开启后：仅"有效读数超悬崖阈值（30cm）"仍判坠；"无底部/无效读数"不再拦（**即无底部防坠保护**；启动即 WARN + 每 5s 节流 WARN）。**装机禁开**——不传即严格（与修复前逐字段一致）。口径与 `docs/ULTRASONIC_WIRING.md` §5 同源；单颗过渡仍建议：只做离线观察，不起 safety_node。
 
 ### 子包内容
 

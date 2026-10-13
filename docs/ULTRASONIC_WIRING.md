@@ -95,6 +95,7 @@ GPIO 仅超声使用。）
 > ⚠️ **过渡期口径（U-5，2026-10-05）**：只接部分传感器（如单颗 `-p 'active:=[1]'`）且 `use_gpio:=true` 时，未接入通道——尤其**底部 `bottom`**——按 fail-closed 发无效读数；此时若 `safety_node` 在运行，「bottom 无效」将被悬崖判据视为坠落风险 ⇒ `cliff_detected=true` ⇒ 决策链最高优先级 **STOP**（`determine_action` 悬崖分支最先判定，见 `sensor_fusion.cpp`；**根因** = core `sensor_ultrasonic.cpp:250-251`（`is_fall_risk` 注入分支）+ 阈值 `config.h:51`（`cliff_threshold_cm = 30.0`））⇒ 机器人无法行走。
 > - 用途边界：过渡期单颗真读适合**离线观察/录数**（不起 `safety_node`）；要接入安全链行走，必须**接满 4 路（含底部）**或回到模拟模式。
 > - 「过渡期放宽」若要做成正式口径 = 安全链口径变更，需**师兄拍板**后另行修改（本批修复不动安全阈值）。
+> - **2026-10-13 更新（已落地·参数化）**：过渡期放宽已实现为**启动期参数 `relax_missing_bottom`（默认 false = 严格）**——台架显式 `-p relax_missing_bottom:=true` 后，缺/无效底部读数不再判坠（**有效读数超 30cm 照判**；即无底部防坠保护，启动 + 每 5s WARN）；**装机禁开**（不传即严格，与修复前逐字段一致）。使用说明见 `README.md`「过渡期底部放宽」节；实现 = core `is_fall_risk` 放宽分支（先红后绿单测锁定）。
 
 ## 6. 与代码的对应关系（改代码时只看这行）
 

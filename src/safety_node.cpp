@@ -116,6 +116,12 @@ public:
         ultrasonic_timeout_ms_ = std::max(50, static_cast<int>(
             this->declare_parameter("ultrasonic_timeout_ms", 500)));
 
+        // U-5 过渡期放宽 (2026-10-13, 口径包): 默认 false = fail-closed (缺/无效底部 ⇒ 判坠 ⇒ STOP)。
+        //   true = 仅"有效读数 > 悬崖阈值"才判坠; "无信息"(未接/无效) 不再拦 —— **仅过渡期台架**,
+        //   装机禁开 (安全链口径; 见 docs/ULTRASONIC_WIRING.md §5 与 README「过渡期底部放宽」)。
+        //   启动期参数: 不入运行期白名单 (param_policy.hpp), `ros2 param set` 会被明确拒绝。
+        relax_missing_bottom_ = this->declare_parameter("relax_missing_bottom", false);
+
         // ---- 相机几何 (v2.6): 台架 0.6m / 装机 0.18~0.2m —— **一处配置, 不再写死** ----
         // 动因 (真机实测 2026-09-13): ground_prior_z(-0.18) 是装机值 (假设相机离地 18cm);
         //   台架把相机架在 0.6m 时真地面落在先验窗之外 → 拟合器锁到别的面 →
@@ -244,6 +250,12 @@ public:
         // ---- 初始化算法库 ----
         astra_ = std::make_unique<AstraProDriver>(use_simulated_);
         ultrasonic_ = std::make_unique<UltrasonicArrayDriver>(get_ultrasonic_layout());
+        ultrasonic_->set_relax_missing_bottom(relax_missing_bottom_);   // U-5 (2026-10-13)
+        if (relax_missing_bottom_) {
+            RCLCPP_WARN(this->get_logger(),
+                "relax_missing_bottom=true: 缺少/无效底部读数不再判坠 (无底部防坠保护) —— "
+                "仅过渡期台架; 装机禁开");
+        }
         ir_ = std::make_unique<InfraRedSensor>(use_simulated_);
         fusion_ = std::make_unique<SensorFusion>(astra_.get(), ultrasonic_.get(), ir_.get());
 
@@ -469,6 +481,11 @@ public:
                 auto result = fusion_->fuse();
                 // ROS-3: 先判停止, 再决定是否写共享状态 (析构中不再访问成员)
                 if (!fusion_running_.load()) break;
+
+                if (relax_missing_bottom_) {
+                    RCLCPP_WARN_THROTTLE(this->get_logger(), *this->get_clock(), 5000,
+                        "relax_missing_bottom=true: 无底部防坠保护已放宽 (仅过渡期台架; 装机禁开)");
+                }
                 // v2.9.23 (批B N1, 二轮审查修复): 超声"启动门窗口" (source=topic 首帧未到)
                 //   —— 本段无悬崖层, 动作层强制 STOP (fail-closed)。修复前实测该窗口
                 //   action=FORWARD vel=(0.06→0.12 m/s) 照走 (cliff=no); 旧注释"实测=STOP"被证伪。
@@ -1367,6 +1384,7 @@ private:
     //   与融合线程之间共享 —— std::string/time_point 非原子 ⇒ 旧版为数据竞争。
     //   现: 字符串加锁 (ultra_state_mutex_), 标志/时间戳改原子 (ns 表达, 0=未设)。
     std::string ultrasonic_requested_ = "auto";   // 用户请求值 (仅构造期写, 之后只读)
+    bool relax_missing_bottom_ = false;           // U-5 (2026-10-13): 过渡期放宽 (默认严格; 启动期)
     std::string ultrasonic_source_ = "auto";      // 解析后的实际来源 (受 ultra_state_mutex_ 守护)
     std::mutex  ultra_state_mutex_;               // B9: 守护 ultrasonic_source_
     std::atomic<bool>     ultrasonic_enabled_{true};   // 是否接在安全链上

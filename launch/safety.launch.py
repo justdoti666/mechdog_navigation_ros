@@ -76,6 +76,11 @@ def generate_launch_description():
             'ultrasonic_timeout_ms', default_value='500',
             description='超声话题超时 (ms): 超过则把超声移出安全链 (避免回落模拟随机数)'),
         DeclareLaunchArgument(
+            'relax_missing_bottom', default_value='false',
+            description='U-5 过渡期放宽 (2026-10-13): true=缺/无效底部读数不再判坠 '
+                        '(仅"有效读数超阈值(30cm)"才判悬崖; 无底部防坠保护, 启动+每5s WARN) —— '
+                        '仅过渡期台架使用, 装机禁开'),
+        DeclareLaunchArgument(
             'camera_height_m', default_value='-1.0',
             description='相机镜头离**地面**高度(m): >0 时推导地面高度先验 = -(h - camera_z)。'
                         '台架(相机架高约 0.6m)用 camera_height_m:=0.6 camera_z:=0；'
@@ -123,6 +128,7 @@ def generate_launch_description():
                 'ultrasonic_source': LaunchConfiguration('ultrasonic_source'),
                 'allow_simulated_ultrasonic': LaunchConfiguration('allow_simulated_ultrasonic'),
                 'ultrasonic_timeout_ms': LaunchConfiguration('ultrasonic_timeout_ms'),
+                'relax_missing_bottom': LaunchConfiguration('relax_missing_bottom'),
                 # v2.6: 算法侧外参与静态 TF **同源** (修掉"TF 用 launch 值/算法用硬编码")
                 'cloud_x': LaunchConfiguration('camera_x'),
                 'cloud_z': LaunchConfiguration('camera_z'),
