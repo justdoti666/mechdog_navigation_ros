@@ -46,6 +46,25 @@ python3 ~/pi_replay.py ~/frames_平地 10 1    # 每帧 @10Hz 回放一遍
 
 > 为什么必须"同一帧"：曾用**退化输入**（`plane=0` 的帧）去量成功路径耗时，结论全错 ⇒ 只有同一批像素才能当证据。
 
+### 2.1 A 批「材质指纹对照实验」工具（2026-10-15）
+
+```bash
+export ROS_DOMAIN_ID=42                      # ★ Pi 上节点在这个 domain，不设会"看不到话题"
+python3 ~/hidden_probe.py --preflight --terrain                     # 前置：链路/超声/深度在不在
+python3 ~/hidden_probe.py --label ~/label.json --out ~/a_mat.jsonl \
+        --terrain --secs 10 --hz 2                                  # 每个测点采 10s（label 每轮重读）
+python3 ~/hidden_summarize.py --in ~/a_mat.jsonl --out ~/矩阵.md      # 出「材质×传感器」指纹矩阵
+```
+
+- **`hidden_probe.py`**：把**三层对同一块材质的反应**按帧配对存档 —— 超声原始读数（`/ultrasonic`）+
+  节点判据真值（`/fusion_result` 的 `hidden_obstacle*`）+ 深度层独立证据（`/safety/terrain_grid` 复算
+  "该方向距离带内禁行格数"，几何与 `HeightMap25Config` 同口径：`wx=min_x+(c+.5)cell`、`wy=-y_half+(r+.5)cell`、
+  禁行格 = 1/2/4、Unknown 不算）。
+  **本脚本不重新实现判据**（窗 [0.90,3.00]m / 带 ±0.25m / 扇区 ±25° 由节点自己算），只做配对与"深度侧是否有挡格"的旁证。
+- **`hidden_summarize.py`**：按 `label.json` 分组出矩阵（`○`/`·`/`?`）+ 逐测点明细 + 判读建议草稿。
+- **协议**（现场照着做）：[`docs/材质对照实验协议_2026-10-15.md`](../docs/材质对照实验协议_2026-10-15.md)
+  —— 含 5 材质×3 距离矩阵、每测点 5 步、验收判据、**已知坑表**（domain 42 / camera_info / 板贴地 / 距离出窗 / 地形未注入 …）。
+
 ## 3 相机 / 无线 / 运维
 
 | 脚本 | 用途 |
