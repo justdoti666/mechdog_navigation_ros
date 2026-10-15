@@ -210,6 +210,18 @@ voxel_layer:
 - **fail-closed**：平面拟合失败（镜头没对着地面/外参不对）→ 不输出负障碍、真机模式 10s 节流告警；模拟模式数据是纯墙面，恒无负障碍属预期
 - 依赖外参：`ground_prior_z = -0.18` 与 `CameraExtrinsics` 联动，装机量测后**两处同步改**
 
+### 隐身障碍交叉层检测（A 批）+ 减速开关
+
+- 判据：**超声有回波 ∩ 2.5D 同方位带内无禁行格** ⇒ 疑似镜面/透明「隐身」障碍（深度与激光雷达在镜面/透明板上失效的物料）。窗 `[0.90, 3.00] m` / 带 `±0.25 m` / 扇区 `±25°`；禁行格 = ObstacleUp / CliffDown / TooSteep。
+- 输出：`/fusion_result` JSON（`hidden_obstacle` / `hidden_dir` / `hidden_dist_m` / `hidden_slow`）+ `/safety/status_text` 后缀 + 2s 节流 WARN。**未注入地形 / 超声未接入时恒不触发**（接入前行为逐位一致）。
+- 行为挂接（`hidden_slow_enable`，默认 `false` = 纯观测）：置 `true` 后触发期间前进限速 **≤ SLOW（0.10 m/s，与 S1 同款硬上限）**；运行期 `ros2 param set` 可热切换（上升沿 WARN + 解除落一条 INFO）：
+
+  ```bash
+  ros2 launch mechdog_navigation_ros safety.launch.py use_simulated:=false hidden_slow_enable:=true
+  ```
+
+  送审与启用时点按师兄节奏（默认关 = 零行为变化；台架注入 A/B：开=0.10 m/s / 关=0.20 m/s 对照）。
+
 ## RGB 回传整合（替代支架相机）
 
 原支架上的可见光相机由 Astra Pro 的 RGB 一并承担（云台未落实，相机与 Astra 均为固定朝前，无视野损失），支架上仅保留红外热成像。整合动机：
@@ -342,6 +354,8 @@ Pi 上真机运行/汇报用的一组脚本（实时窗口、抓帧取证、离�
 - [x] 地面提取双路径 + cell 跳过 RANSAC（v2.9.16：精度 0.98°/1.39° → 0.02°）
 - [x] 汇报窗口工具（tools/：实时窗口 + 抓帧/回放 + A/B 脚本）
 - [x] 超声修复批 U-1~U-7（2026-10-05，离线全绿）：`use_gpio` 不可用 ⇒ fail-closed 全通道无效（先红后绿 6/6；运行时工装 0×`valid=true`）；GPIO 开关 `MECHDOG_GPIOD_API`（auto 判版 / 显式矛盾 FATAL）；v2 路径逐路 request（**首次真编**：26.04 + libgpiod 2.2.1）；取证工装 `ultra_failclosed_check.sh`・`ultra_capture.sh`；文档口径（3.3V 台架过渡 / 单颗 ⇒ 永久 STOP）→ `docs/ULTRASONIC_WIRING.md`
+- [x] A 批：隐身障碍交叉层检测（2026-10-11，纯观测）+ 行为挂接开关（2026-10-14）：超声有回波 ∩ 2.5D 同方位无禁行格 ⇒ `hidden_obstacle_*`（窗 0.90–3.00 m / 带 ±0.25 m / 扇区 ±25°）；`hidden_slow_enable`（默认 false）开启后触发期前进限速 ≤SLOW（0.10 m/s）；状态文本 / 日志 / `/fusion_result` 均携信号；运行期可 set
+- [x] R-8 帧指纹（2026-10-12/15）：「感知:」行尾 `| 帧fp=<8hex>`（空/模拟帧 `--------`）⇔ 与离线工装同实现 ⇒ 离线复算**自证同帧**；对照工具 `wedge_compare.py`（core `tools/`）；跨仓版本锁 20924（v2.9.24）
 - [ ] 真机超声波（HC-SR04 实机数据 = STM32 0x02 上报经桥节点补丁 → /ultrasonic，**待师兄固件+桥补丁落地**；备选本包 GPIO 路径：单颗真读已跑通〔2026-10-04〕，四路 + U 批行为复验待上机，取证用 `tools/ultra_capture.sh`）
 - [ ] Stm32ChassisBridge 串口实机联调（协议已实现, 待硬件验证）
 - [ ] 建图真机化（Astra 真深度替换合成帧 + 真底盘 odom 位姿；Windows 侧静止/旋转扫描已由算法库 `tools/mapping_real_test` 验证）
