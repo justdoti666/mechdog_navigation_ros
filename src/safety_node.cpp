@@ -61,6 +61,7 @@
 #include "sensor_geometry.hpp"     // v2.6: 相机几何 → 地面高度先验
 #include "safety_warmup.hpp"   // R4 (REVIEW): 启动预热 —— 等 bottom 首帧再首轮 fuse
 #include "ultrasonic_source.hpp"   // v2.5: 超声来源解析 (真机拒绝模拟随机数)
+#include "frame_fingerprint.h"     // R-8: 帧指纹 (与离线工装 tools/wedge_recompute.cpp 共用实现)
 #include <cstdint>                 // v2.9.23 (批B B9): int64_t 时间戳 (ns 原子)
 #include "safety_ultra_gate.hpp"   // v2.9.23 (批B N1): 超声门窗口动作层策略 (纯函数)
 #include "param_policy.hpp"        // v2.9.23 (批B N4): 运行期参数白名单 (纯函数)
@@ -1104,8 +1105,12 @@ private:
                     tilt_deg, cloud_E_.pitch, cloud_E_.pitch * 57.29577951308232);
             }
         }
+        // R-8 (2026-10-12): 帧指纹进日志 —— 离线复算据此**自证同帧** (不再靠"点云数唯一"间接论证)。
+        //   空帧/模拟帧没有像素可指纹 ⇒ 打 `--------`, 避免 00000000 看起来像个真指纹。
+        const std::string fp_hex = frame.depth_map.empty()
+            ? std::string("--------") : mechdog::depth_fingerprint_hex(frame.fingerprint);
         RCLCPP_INFO_THROTTLE(this->get_logger(), *this->get_clock(), 3000,
-            "感知: 点云=%zu 平面valid=%d tilt=%.2f° [n=(%.3f,%.3f,%.3f) 分量 %.2f°/%.2f°] h0=%.3fm 内点=%zu neg=%zu fit=%s | 2.5D %s",
+            "感知: 点云=%zu 平面valid=%d tilt=%.2f° [n=(%.3f,%.3f,%.3f) 分量 %.2f°/%.2f°] h0=%.3fm 内点=%zu neg=%zu fit=%s | 2.5D %s | 帧fp=%s",
             cloud_base_.points.size(), static_cast<int>(seg_.plane.valid),
             std::acos(std::min(1.0, std::max(-1.0, static_cast<double>(seg_.plane.nz)))) *
                 180.0 / 3.14159265358979323846,
@@ -1118,7 +1123,8 @@ private:
             static_cast<double>(seg_.plane.height_at_origin()),
             static_cast<size_t>(seg_.plane.inliers), seg_.negative_points.size(),
             (seg_.used_ransac ? "ransac" : (seg_.used_cell ? "cell" : "none")),   // v2.9.16
-            hm.valid ? hm.stats().c_str() : "invalid (无平面→fail-closed, 路1 静默)");
+            hm.valid ? hm.stats().c_str() : "invalid (无平面→fail-closed, 路1 静默)",
+            fp_hex.c_str());
 
         have_perception_ = true;
     }

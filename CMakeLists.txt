@@ -22,7 +22,7 @@ endif()
 
 # B17 (v2.9.22): 跨仓版本锁定 —— 断言所吃算法库源码的版本, 防"半批部署/新旧混合"静默漂移
 # 升级纪律: 两仓同批 —— core/version.h 的 PATCH+1 与下方 MECHDOG_CORE_VERSION_REQUIRED 必须一致
-set(MECHDOG_CORE_VERSION_REQUIRED 20923)
+set(MECHDOG_CORE_VERSION_REQUIRED 20924)
 if(NOT EXISTS "${MECHDOG_ALGO_DIR}/version.h")
   message(FATAL_ERROR
     "核心算法库缺少 version.h: ${MECHDOG_ALGO_DIR}\n"
