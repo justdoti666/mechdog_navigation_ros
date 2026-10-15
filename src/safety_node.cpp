@@ -191,6 +191,14 @@ public:
         RCLCPP_INFO(this->get_logger(),
             "退化期降级链(S1): %s (前进限速≤SLOW / 阈值20-40-70cm; degraded_policy:=false 关闭)",
             degraded_policy_ ? "启用" : "关闭(仅上报)");
+
+        // A 行为挂接 (v2.9.25): 隐身障碍触发减速开关 —— false(默认): 纯观测 (只报警, 不改动作);
+        //   true: 触发期间前进限速 ≤SLOW (path_planner 硬上限, 与 S1 同款)。
+        //   口径 (2026-10-14 发起人定): 档位=现有 SLOW 档; 无迟滞; 送审/启用时点待定。
+        hidden_slow_enable_ = this->declare_parameter("hidden_slow_enable", false);
+        RCLCPP_INFO(this->get_logger(),
+            "A 行为挂接(隐身障碍减速): %s (hidden_slow_enable; false=纯观测)",
+            hidden_slow_enable_ ? "启用(触发 => 前进限速≤SLOW)" : "关闭");
         const double prior_override = this->declare_parameter("ground_prior_z", -999.0);
 
         cloud_E_.x     = cloud_x_;
@@ -259,6 +267,7 @@ public:
         }
         ir_ = std::make_unique<InfraRedSensor>(use_simulated_);
         fusion_ = std::make_unique<SensorFusion>(astra_.get(), ultrasonic_.get(), ir_.get());
+        fusion_->set_hidden_slowdown(hidden_slow_enable_);   // A 行为挂接 (v2.9.25): 启动期同步开关
 
         // ---- 超声来源解析 (v2.5): 先解析, 再决定是否把超声接进安全链 ----
         {
@@ -348,6 +357,15 @@ public:
                                 depth_degraded_.load() ? "当前仍处降级段, 已立即重新接入"
                                                        : "待下次进入降级段时生效");
                         }
+                    } else if (name == "hidden_slow_enable") {
+                        const bool on = p.as_bool();
+                        if (on == hidden_slow_enable_.load()) continue;
+                        hidden_slow_enable_.store(on);
+                        fusion_->set_hidden_slowdown(on);
+                        RCLCPP_WARN(this->get_logger(),
+                            "hidden_slow_enable -> %s (运行期): %s",
+                            on ? "true" : "false",
+                            on ? "触发时前进限速≤SLOW 已接入" : "减速立即解除, 回到纯观测");
                     } else if (name == "depth_bad_streak_n") {
                         const int v = std::max(1, static_cast<int>(p.as_int()));
                         depth_bad_streak_n_.store(v);
@@ -969,12 +987,13 @@ private:
         if (ultra_chain_state_.load() == 2) {   // v2.9.23 (批B N1): 门窗口显式披露 (动作层=STOP)
             s.data += "  |  超声未接入(等待首帧): 本段无悬崖保护, 动作层=STOP (fail-closed)";
         }
-        if (hidden_suspect_.load()) {   // A (v2.9.24): 隐身障碍可疑 (超声有/深度无; 纯观测, 不改动作)
+        if (hidden_suspect_.load()) {   // A (v2.9.24/25): 隐身障碍可疑 (减速状态随开关)
             const int hd = hidden_dir_code_.load();
-            char h2[176];
+            char h2[224];
             std::snprintf(h2, sizeof(h2),
-                "  |  疑似隐身障碍(镜面/透明): %s@%.2fm — 超声有回波、深度同方位无对应障碍 (纯观测)",
-                hd == 1 ? "左" : hd == 2 ? "正前" : hd == 3 ? "右" : "?", hidden_dist_m_.load());
+                "  |  疑似隐身障碍(镜面/透明): %s@%.2fm — 超声有回波、深度同方位无对应障碍 (%s)",
+                hd == 1 ? "左" : hd == 2 ? "正前" : hd == 3 ? "右" : "?", hidden_dist_m_.load(),
+                hidden_slow_enable_.load() ? "减速中: 前进限速≤SLOW" : "纯观测");
             s.data += h2;
         }
         status_text_pub_->publish(s);
@@ -1273,11 +1292,24 @@ private:
                 scan_n, result.depth_degraded ? "YES" : "no",
                 chain_state_to_str(ultra_chain_state_.load()));   // v2.9.23 (批B N1): 超声链状态
         }
-        // A (v2.9.24): 隐身障碍可疑 —— 独立 WARN (2s 节流; 纯观测, 不改动作; 供现场排查)
+        // A (v2.9.24/25): 隐身障碍可疑 —— 上升沿立即告警 + 持续 2s 节流; 解除时报一条 (供现场取证)
         if (fresh && result.hidden_obstacle_suspect) {
+            const bool slowing = hidden_slow_enable_.load();
+            if (!hidden_warn_prev_) {
+                RCLCPP_WARN(this->get_logger(),
+                    "A: 疑似隐身障碍(镜面/透明) %s@%.2fm — 超声有回波、深度同方位无对应障碍 (%s)",
+                    result.hidden_obstacle_dir.c_str(), result.hidden_obstacle_dist_m,
+                    slowing ? "已触发减速: 前进限速≤SLOW" : "纯观测");
+            }
             RCLCPP_WARN_THROTTLE(this->get_logger(), *this->get_clock(), 2000,
-                "A: 疑似隐身障碍(镜面/透明) %s@%.2fm — 超声有回波、深度同方位无对应障碍 (纯观测)",
-                result.hidden_obstacle_dir.c_str(), result.hidden_obstacle_dist_m);
+                "A: 疑似隐身障碍持续中 %s@%.2fm%s",
+                result.hidden_obstacle_dir.c_str(), result.hidden_obstacle_dist_m,
+                slowing ? " (减速中)" : "");
+            hidden_warn_prev_ = true;
+        } else if (hidden_warn_prev_) {
+            RCLCPP_INFO(this->get_logger(), "A: 隐身障碍解除 —— %s",
+                hidden_slow_enable_.load() ? "减速解除, 速度恢复正常" : "回到纯观测");
+            hidden_warn_prev_ = false;
         }
     }
 
@@ -1372,11 +1404,14 @@ private:
     std::atomic<bool>   hidden_suspect_{false};
     std::atomic<int>    hidden_dir_code_{0};   // 0=无 1=left 2=center 3=right
     std::atomic<double> hidden_dist_m_{0.0};
+    bool    hidden_warn_prev_   = false;  // A 行为挂接 (v2.9.25): 触发沿/解除沿日志 (on_timer 线程独占)
     bool    depth_ever_good_    = false;  // 是否见过好帧 (v2.9.18 N9: 启动期也计数, 仅门槛提高)
     int     depth_last_reason_  = -1;     // 最近一次原因: 0=无帧 1=质量守门 2=点云为空
     double  last_degraded_status_s_ = -1e9;  // 上次主动发降级文案的时刻 (1Hz 节流)
     // v2.9.20 (S1, N2): 降级链开关 (参数 degraded_policy; true = 降级期"前进限速≤SLOW + 反应线 20/40/70cm")
     std::atomic<bool> degraded_policy_{true};   // T-A2b: executor 参数回调写 / 融合线程读 -> 原子
+    // A 行为挂接 (v2.9.25): 隐身障碍减速开关 (参数 hidden_slow_enable; 默认 false=纯观测)
+    std::atomic<bool> hidden_slow_enable_{false};   // T-A2b 同款: 参数回调写 / 融合线程读 -> 原子
     rclcpp::Publisher<std_msgs::msg::String>::SharedPtr status_text_pub_;   // v2.9.18: 构造期已创建
     rclcpp::node_interfaces::OnSetParametersCallbackHandle::SharedPtr param_cb_;   // T-A2b: 运行期参数回调(须存活)
     double  depth_gate_vr_   = 0.0;   // 本轮的深度有效率
@@ -1484,6 +1519,7 @@ private:
             << ",\"hidden_obstacle\":" << (r.hidden_obstacle_suspect ? "true" : "false")
             << ",\"hidden_dir\":\"" << r.hidden_obstacle_dir << "\""
             << ",\"hidden_dist_m\":" << r.hidden_obstacle_dist_m
+            << ",\"hidden_slow\":" << (r.hidden_slowdown ? "true" : "false")
             << ",\"min_fwd_m\":" << r.min_forward_distance_m
             << ",\"cliff_layer\":\"" << chain_state_to_str(ultra_chain_state_.load()) << "\""
             << ",\"action\":\"" << action_to_str(r.recommended_action) << "\""

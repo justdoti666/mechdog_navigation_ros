@@ -110,6 +110,9 @@ def generate_launch_description():
             'degraded_policy', default_value='true',
             description='v2.9.20 (S1,N2) 退化期降级链: 降级期间前进限速≤SLOW + 反应线 20/40/70cm; false=仅上报(回 v2.9.19 行为)'),
         DeclareLaunchArgument(
+            'hidden_slow_enable', default_value='false',
+            description='v2.9.25 (A 行为挂接) 隐身障碍触发减速: 触发期间前进限速≤SLOW; false=纯观测(默认)'),
+        DeclareLaunchArgument(
             'publish_depth_small', default_value='true',
             description='v2.9.15 发布 /safety/depth_small (16UC1 320x240, 供汇报窗口; 关掉可省带宽)'),
         Node(
@@ -142,6 +145,7 @@ def generate_launch_description():
                 'cell_skip_ransac': LaunchConfiguration('cell_skip_ransac'),
                 'depth_bad_streak_n': LaunchConfiguration('depth_bad_streak_n'),
                 'degraded_policy': LaunchConfiguration('degraded_policy'),
+                'hidden_slow_enable': LaunchConfiguration('hidden_slow_enable'),
                 'publish_depth_small': LaunchConfiguration('publish_depth_small'),
             }],
         ),

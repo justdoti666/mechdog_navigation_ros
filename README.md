@@ -129,9 +129,9 @@ ros2 run mechdog_ultrasonic ultrasonic_node
 - **v2.9.23 修复批（批B 行为项）**：① **N1 门窗口动作层=STOP**（超声 source=topic 首帧未到期间，修复前实测照走 FORWARD 0.06→0.12 m/s；现强制 STOP，且 `/fusion_result`、`/safety/status_text`、5Hz 日志透出 `cliff_layer=waiting_first_frame`）；② **B12 残：chassis_bridge_node 上游看门狗**（`cmd_vel_timeout_ms` 默认 500ms，见上）；③ **N4 运行期参数白名单**（`ros2 param set` 仅白名单即时生效，其余明确拒绝，见「参数一览」注）；④ **B9 跨线程状态原子化/加锁**（超声链路状态、深度新鲜度、相机内参 —— 旧报告两次点名项）。版本 v2.9.22→v2.9.23（两仓同批）。
 - **前向全盲行为（接真机前必读）**：算法库在前向三方向全部失效（镜头被挡 + 三颗前向超声全坏）时输出 `SLOW_FORWARD` 降速盲行（仅 bottom 悬崖兜底），**不是 STOP**。接机械狗前务必与师兄闸门确认该场景有叠加保护；若本层是最后防线，按 mechdog_navigation README「已知限制」#7 把该分支改为 `STOP`。
 
-## 参数一览（safety_node，共 34 个）
+## 参数一览（safety_node，共 35 个）
 
-启动期 `--ros-args -p <名>:=<值>` 均可改；**运行期 `ros2 param set` 仅白名单参数即时生效**（`degraded_policy` / `depth_bad_streak_n` / `depth_timeout_ms` / `ultrasonic_timeout_ms` / `publish_depth_small` / `grid_wedge_only` / `cloud_downsample_step`），其余参数会被**明确拒绝**并在 reason 说明（v2.9.23 批B N4：不再"静默成功但无效"）。标 ★ 的另有 launch 透传（`xxx:=值`）。
+启动期 `--ros-args -p <名>:=<值>` 均可改；**运行期 `ros2 param set` 仅白名单参数即时生效**（`degraded_policy` / `depth_bad_streak_n` / `depth_timeout_ms` / `ultrasonic_timeout_ms` / `publish_depth_small` / `grid_wedge_only` / `cloud_downsample_step` / `hidden_slow_enable`），其余参数会被**明确拒绝**并在 reason 说明（v2.9.23 批B N4：不再"静默成功但无效"）。标 ★ 的另有 launch 透传（`xxx:=值`）。
 
 | 分组 | 参数 | 默认 | 说明 |
 |---|---|---|---|
@@ -153,6 +153,7 @@ ros2 run mechdog_ultrasonic ultrasonic_node
 | | `cell_skip_ransac`★ | true | cell 成功时跳过 RANSAC（v2.9.16 口径①；false=历史行为） |
 | 深度守门 | `depth_bad_streak_n`★ | 3 | 连续 N 轮坏 ⇒ 降级并在 `/safety/status_text` 显式上报（v2.9.17） |
 | | `degraded_policy`★ | true | v2.9.20 (S1/N2) 降级期：前进限速≤SLOW + 反应线 20/40/70cm；false=仅上报（回 v2.9.19）；v2.9.21 起**运行期可 set**（回调即时生效） |
+| | `hidden_slow_enable`★ | false | v2.9.25 (A 行为挂接)：触发(疑似隐身障碍)期间前进限速≤SLOW；false=纯观测；**运行期可 set** |
 | 发布开关 | `enable_pointcloud`★ | false | 发 `/mechdog/point_cloud` + `/mechdog/negative_obstacles` |
 | | `cloud_topic` / `cloud_frame` / `cloud_downsample_step` | /mechdog/point_cloud / camera_link / 8 | 点云话题名 / 坐标系 / 降采样步长（每 N 点取 1） |
 | | `negative_topic` / `grid_wedge_only` | /mechdog/negative_obstacles / true | 负障碍话题名 / 视场楔形口径（仅统计） |

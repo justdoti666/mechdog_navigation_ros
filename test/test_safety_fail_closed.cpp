@@ -181,8 +181,9 @@ TEST(UltraGateWindow, WaitingFirstFrameForcesStop) {
 // N4 (二轮审查): 运行期参数白名单 —— 仅"真能即时生效"的参数允许 set;
 //   其余 (话题/几何/开关, 启动期固化) 必须不在白名单 (回调会显式拒绝)。
 TEST(ParamPolicy, RuntimeWhitelistMatchesImpl) {
-    // 白名单 (7 项, 与 safety_node 回调 if-链逐一对应)
+    // 白名单 (8 项, 与 safety_node 回调 if-链逐一对应)
     EXPECT_TRUE(mechdog_ros::param_runtime_syncable("degraded_policy"));
+    EXPECT_TRUE(mechdog_ros::param_runtime_syncable("hidden_slow_enable"));
     EXPECT_TRUE(mechdog_ros::param_runtime_syncable("depth_bad_streak_n"));
     EXPECT_TRUE(mechdog_ros::param_runtime_syncable("depth_timeout_ms"));
     EXPECT_TRUE(mechdog_ros::param_runtime_syncable("ultrasonic_timeout_ms"));

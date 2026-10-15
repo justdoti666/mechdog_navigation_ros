@@ -16,6 +16,7 @@ namespace mechdog_ros {
 
 inline bool param_runtime_syncable(const std::string& name) {
     return name == "degraded_policy"        // 降级链开关 (T-A2b 起运行期可 set)
+        || name == "hidden_slow_enable"     // A 行为挂接: 隐身障碍触发减速开关 (v2.9.25)
         || name == "depth_bad_streak_n"     // 深度降级阈值 (v2.9.23)
         || name == "depth_timeout_ms"       // 深度超时看门狗 (v2.9.23)
         || name == "ultrasonic_timeout_ms"  // 超声超时看门狗 + 驱动注入超时 (v2.9.23, 与 B4 同源)
