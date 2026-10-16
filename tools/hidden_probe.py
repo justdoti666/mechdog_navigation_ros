@@ -72,6 +72,10 @@ BLOCKED_FLAGS = (1, 2, 4)          # ObstacleUp / CliffDown / TooSteep
 FLAG_NAME = {0: "Unknown", 1: "ObstacleUp", 2: "CliffDown", 3: "Traversable", 4: "TooSteep"}
 MIN_CMP_M, MAX_CMP_M, BAND_M, SECTOR_HALF_DEG = 0.90, 3.00, 0.25, 25.0
 
+# 配对新鲜度上限（秒）：节点 5Hz 发 /fusion_result、超声 20Hz ⇒ 3s 内仍视为"同一时刻的现场"
+FUSION_MAX_AGE_S = 3.0
+ULTRA_MAX_AGE_S = 3.0
+
 FUSION_KEYS = ("hidden_obstacle", "hidden_dir", "hidden_dist_m", "hidden_slow",
                "degraded", "cliff", "action", "min_fwd_m", "vx", "wz", "environment", "timestamp")
 
@@ -201,6 +205,12 @@ class HiddenProbe(Node):
             except Exception:
                 node = {"_parse_error": self.fusion[:120]}
         rec["node"] = node
+        # 新鲜度标记（2026-10-15 E2E 自检发现）：节点 5Hz、超声 20Hz，配对窗口取 3s；
+        #   超过 = 这一条不可信 ⇒ 打 fresh=false，分析器默认剔除（不是丢弃，保留可追溯）。
+        fa = rec["age_s"]["fusion"]
+        ua = rec["age_s"]["ultra"]
+        rec["fresh"] = bool(self.fusion) and (fa is not None and fa <= FUSION_MAX_AGE_S) \
+            and (self.ultra is not None and ua is not None and ua <= ULTRA_MAX_AGE_S)
         # 深度层辅助列（每个方向）
         for d, yaw in (("left", +yaw_mag), ("center", 0.0), ("right", -yaw_mag)):
             u = rec["ultra_dirs"].get(d)
@@ -286,6 +296,10 @@ def main() -> int:
         t0 = time.time()
         n_sym = 0
         mark_next = [False]          # 主循环置位；采样时消费
+        # 预热：先转 0.6s，把订阅建立/首帧到达的时延吃掉（否则开头几条会 age_s 偏大被判不新鲜）
+        t_warm = time.time()
+        while rclpy.ok() and (time.time() - t_warm) < 0.6:
+            rclpy.spin_once(node, timeout_sec=0.05)
         with open(args.out, "a", encoding="utf-8") as fo:
             while rclpy.ok():
                 # 键盘（可选，非阻塞）
@@ -315,7 +329,8 @@ def main() -> int:
                       f" | 超声 center={uc.get('dist_m')}m/{'ok' if uc.get('valid') else 'NA'}"
                       f" | 带内禁行格={band['blockers_in_band'] if band else 'n/a'}"
                       f"/{band['cells_in_band'] if band else 'n/a'}"
-                      f" | slow={nd.get('hidden_slow')} action={nd.get('action')}")
+                      f" | slow={nd.get('hidden_slow')} action={nd.get('action')}"
+                      f"{'' if rec.get('fresh') else ' [不新鲜,分析器会剔除]'}")
                 if args.secs is not None and (time.time() - t0) >= args.secs:
                     break
                 if args.symbols is not None and n_sym >= args.symbols:

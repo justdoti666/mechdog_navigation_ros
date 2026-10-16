@@ -120,15 +120,19 @@ def main() -> int:
     ap.add_argument("--in", dest="inp", required=True)
     ap.add_argument("--out", dest="out", default=None)
     ap.add_argument("--only-marked", action="store_true", help="只用 marked=true 的采样点")
+    ap.add_argument("--keep-stale", action="store_true",
+                    help="默认剔除 fresh=false（配对超时）的采样点；此开关可保留（调试用）")
     ap.add_argument("--dir", default="center", choices=["center", "left", "right"],
                     help="矩阵用哪个方向（默认正前）")
     args = ap.parse_args()
 
-    recs = load(args.inp)
+    recs_all = load(args.inp)
+    n_stale = sum(1 for r in recs_all if r.get("fresh") is False)
+    recs = recs_all if args.keep_stale else [r for r in recs_all if r.get("fresh") is not False]
     if args.only_marked:
         recs = [r for r in recs if r.get("marked")]
     if not recs:
-        print("没有可用采样点（--only-marked 时请确认打过标）")
+        print("没有可用采样点（--only-marked 时请确认打过标；全部不新鲜时看节点是否在跑）")
         return 1
 
     groups = defaultdict(list)
@@ -142,6 +146,9 @@ def main() -> int:
     A(f"- 矩阵方向：**{args.dir}**；判读常量：窗 [{MIN_CMP_M},{MAX_CMP_M}]m / 距离带 ±0.25m / 逐点 ≥{MIN_HITS} 条")
     if args.only_marked:
         A("- 过滤：仅 `marked=true` 的采样点")
+    if n_stale:
+        A(f"- 已剔除 **{n_stale}** 个不新鲜采样点（`fresh=false`：距最近 `/fusion_result` 或 `/ultrasonic` 超过 3s）"
+          + ("；本次用 `--keep-stale` 保留" if args.keep_stale else ""))
     stale = sum(1 for r in recs if ((r.get("age_s") or {}).get("fusion") or 0) > FUSION_STALE_WARN_S)
     if stale:
         A(f"- ⚠ {stale} 个采样点距最近一次 `/fusion_result` 超过 {FUSION_STALE_WARN_S}s（节点可能没在跑）")
