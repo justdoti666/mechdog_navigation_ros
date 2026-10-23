@@ -107,6 +107,18 @@ bash tools/deploy_all.sh        # 完整部署: 核心改动 + ROS 包 + tools/*
 
 ---
 
+## 7 L0 速度仲裁 A/B（离线，无需硬件）
+
+```bash
+WS=~/mdw_ws bash ~/mdw_ws/src/mechdog_navigation_ros/tools/arbiter_ab.sh
+```
+
+- 判据（`arbiter_enable:=true`）：① 每帧 `|vx| ≤ min(期望, 0.20)`（只减不增）② 出现过 0.15(A) / 0.20(B)（期望确实被采用）③ 期望停发 >300ms ⇒ 零速。
+- `arbiter_enable:=false` 只记录对照：期望速度应**完全无影响**（输出仍由本节点 planner 决定）。
+- 两个模式各起停一次 `safety_node`，**按进程名清理**（`ros2 run` 只是启动器，`kill $!` 会留下子进程继续发 `/l0/out`，混流会污染结论 —— 首版踩过）。
+- 输出：`$OUT/probe_{true,false}.txt` + 样本 CSV + 节点日志（默认 `$HOME/arbiter_ab_<日期>`）。
+- WSL 实测（2026-10-23，Jazzy）：true = PASS（A `0.150` / B `0.200` / C `0.000`）；false = PASS（期望无影响）。真机上把 `use_simulated` 改 `false` 即可复跑同一判据。
+
 ## 已知问题与现状（2026-09-25）
 
 - **彩色流无帧（UVC 通道故障）**：节点已注册 `/camera/color/image_raw`、日志 `color is started`，

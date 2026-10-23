@@ -55,6 +55,7 @@
 #include "sensor_ir.h"
 #include "sensor_fusion.h"
 #include "path_planner.h"
+#include "velocity_arbiter.h"     // L0 (v2.9.25): 速度仲裁层 (外部期望速度 → 安全包络)
 #include "point_cloud.h"
 #include "ground_segmentation.h"
 #include "heightmap_2d5.h"     // 路1: 近场地形避障 (P1.5 2.5D 禁行格 → 融合决策)
@@ -78,6 +79,17 @@ public:
         //       订阅 /unsafe/cmd_vel 作为闸门输入, 经安全检查后转发到 /cmd_vel;
         //       直接发 /cmd_vel 会绕过师兄的安全闸门, 违反安全分层)
         cmd_vel_topic_ = this->declare_parameter("cmd_vel_topic", "/unsafe/cmd_vel");
+        // ---- L0 速度仲裁层 (v2.9.25, OFFLINE_TODO #16) ----
+        // 背景: 本节点原是"决策者" —— 200ms 定时器无条件发布自己算的 action→速度,
+        //   全文无 Twist 订阅 ⇒ 师兄 Nav2 一旦接管 /cmd_vel, 两路指令必然打架, 或只能
+        //   停掉本节点 (= 旁路整套深度安全层)。打开本开关后:
+        //     输入 desired_cmd_topic (Nav2 输出) → VelocityArbiter (只减不增/不产生动作)
+        //     → 发布 cmd_vel_topic (仍是师兄闸门的输入, 安全分层不变)。
+        //   默认 false ⇒ 走原 planner 路径, 接入前行为逐位一致。
+        arbiter_enable_ = this->declare_parameter("arbiter_enable", false);
+        desired_cmd_topic_ = this->declare_parameter("desired_cmd_topic", std::string("/cmd_vel_nav"));
+        // 期望速度超时 (ms): 超时即发零速 (fail-closed, 与融合陈旧 800ms 同思路)
+        desired_timeout_ms_ = this->declare_parameter("desired_timeout_ms", 300);
         // R4 (REVIEW): 启动预热时长 (ms)。融合线程启动时先等底部线程产出首帧再首轮 fuse(),
         //   消除启动期 is_fall_risk() 因 !bottom_have_ 造成的一帧误急停 (~150ms)。
         //   默认 250ms: 就绪即返 (sim ~50-150ms), 有界不阻塞; 超时仍继续 (fail-closed 兜底)。
@@ -585,6 +597,23 @@ public:
 
         // ---- ROS2 接口 ----
         cmd_vel_pub_ = this->create_publisher<geometry_msgs::msg::Twist>(cmd_vel_topic_, 10);
+        // L0 仲裁: 仅启用时订阅期望速度 (关闭时不建订阅 = 零额外开销/零行为变化)
+        if (arbiter_enable_) {
+            desired_sub_ = this->create_subscription<geometry_msgs::msg::Twist>(
+                desired_cmd_topic_, 10,
+                [this](const geometry_msgs::msg::Twist::SharedPtr msg) {
+                    std::lock_guard<std::mutex> lk(desired_mutex_);
+                    desired_cmd_ = VelocityCmd{msg->linear.x, msg->angular.z};
+                    have_desired_ = true;
+                    last_desired_ts_ = std::chrono::steady_clock::now();
+                });
+            RCLCPP_INFO(this->get_logger(),
+                "L0 速度仲裁: 启用 — 期望速度 %s → 安全包络 → %s (超时 %d ms, 只减不增)",
+                desired_cmd_topic_.c_str(), cmd_vel_topic_.c_str(), desired_timeout_ms_);
+        } else {
+            RCLCPP_INFO(this->get_logger(),
+                "L0 速度仲裁: 关闭 (本节点自行决策; 接入前行为)");
+        }
         fusion_pub_ = this->create_publisher<std_msgs::msg::String>("fusion_result", 10);
         if (enable_pointcloud_) {
             cloud_pub_ = this->create_publisher<sensor_msgs::msg::PointCloud2>(cloud_topic_, 5);
@@ -1163,7 +1192,14 @@ private:
             if (!seg.negative_points.empty()) {
                 neg_pub_->publish(
                     marshal_xyz(seg.negative_points, neg_frame_, stamp));
-            } else if (!seg.plane.valid && !use_simulated_) {
+            } else if (seg.plane.valid) {
+                // L1 (v2.9.25): 空点云也要发 —— 下游 costmap (Nav2 obstacle_layer) 靠
+                //   "本次观测到的点集"清除自己的标记; 旧版只在非空时发布 ⇒ 坑/台阶离开
+                //   视野后标记永不清除, 地图里留下一个不存在的禁行区。
+                //   plane.valid = 本帧确实没有负障碍 (是"确认无障碍", 不是"没有数据");
+                //   plane 无效时**不发**, 避免把"不知道"当成"安全"。
+                neg_pub_->publish(marshal_xyz(seg.negative_points, neg_frame_, stamp));
+            } else if (!use_simulated_) {
                 // 真机找不到地面平面 (俯仰/装高参数不对? 或镜头没对着地面) —— 节流提醒
                 RCLCPP_WARN_THROTTLE(this->get_logger(), *this->get_clock(), 10000,
                     "地面平面拟合失败, 负障碍检测停用 (检查相机外参/ground_prior)");
@@ -1251,10 +1287,30 @@ private:
             }
         }
 
-        // 2. 规划 (陈旧时生成本地零速指令, 不再用 planner)
+        // 2. 规划 / 仲裁 (陈旧时生成本地零速指令)
         VelocityCmd cmd;
         if (fresh) {
-            cmd = planner_->plan(result);
+            if (arbiter_enable_) {
+                // L0 (v2.9.25): 外部期望速度 → 安全包络。只减不增; 缺失/超时 ⇒ 零速。
+                VelocityCmd desired;
+                bool have_desired = false;
+                {
+                    std::lock_guard<std::mutex> lk(desired_mutex_);
+                    desired = desired_cmd_;
+                    have_desired = have_desired_ &&
+                        (std::chrono::steady_clock::now() - last_desired_ts_) <=
+                            std::chrono::milliseconds(desired_timeout_ms_);
+                }
+                if (have_desired) {
+                    cmd = arbiter_.arbitrate(desired, result);
+                } else {
+                    cmd = VelocityCmd{};   // fail-closed: 无期望速度 ⇒ 不动
+                    RCLCPP_WARN_THROTTLE(this->get_logger(), *this->get_clock(), 2000,
+                        "L0 仲裁: 期望速度缺失/超时(>%dms), 发布零速", desired_timeout_ms_);
+                }
+            } else {
+                cmd = planner_->plan(result);
+            }
         } else {
             cmd.linear = 0.0; cmd.angular = 0.0;
             RCLCPP_WARN_THROTTLE(this->get_logger(), *this->get_clock(), 2000,
@@ -1283,14 +1339,15 @@ private:
             size_t scan_n;
             { std::lock_guard<std::mutex> lk(scan_mutex_); scan_n = scan_ranges_.size(); }
             RCLCPP_INFO(this->get_logger(),
-                "env=%s cliff=%s min_fwd=%.2fm action=%s vel=(%.2f, %.2f) scan=%zu degraded=%s ultra=%s",
+                "env=%s cliff=%s min_fwd=%.2fm action=%s vel=(%.2f, %.2f) scan=%zu degraded=%s ultra=%s mode=%s",
                 env_to_str(result.environment),
                 result.cliff_detected ? "YES" : "no",
                 result.min_forward_distance_m,
                 action_to_str(result.recommended_action),  // ROS-6 v2.2: 枚举改字符串名
                 cmd.linear, cmd.angular,
                 scan_n, result.depth_degraded ? "YES" : "no",
-                chain_state_to_str(ultra_chain_state_.load()));   // v2.9.23 (批B N1): 超声链状态
+                chain_state_to_str(ultra_chain_state_.load()),   // v2.9.23 (批B N1): 超声链状态
+                arbiter_enable_ ? "arb" : "auto");               // v2.9.25 L0: 仲裁/自决策
         }
         // A (v2.9.24/25): 隐身障碍可疑 —— 上升沿立即告警 + 持续 2s 节流; 解除时报一条 (供现场取证)
         if (fresh && result.hidden_obstacle_suspect) {
@@ -1349,6 +1406,19 @@ private:
 
     // ROS2 接口
     rclcpp::Publisher<geometry_msgs::msg::Twist>::SharedPtr cmd_vel_pub_;
+
+    // ---- L0 速度仲裁 (v2.9.25) ----
+    //   关闭时: 只走 planner (原路径, 行为逐位一致)
+    //   打开时: 期望速度 → arbiter_ → cmd_vel_pub_
+    bool        arbiter_enable_       = false;
+    std::string desired_cmd_topic_;                    // 默认 /cmd_vel_nav (待师兄确认拓扑)
+    int         desired_timeout_ms_   = 300;           // 期望速度超时 ⇒ 零速 (fail-closed)
+    VelocityArbiter arbiter_;                          // 无状态纯函数
+    rclcpp::Subscription<geometry_msgs::msg::Twist>::SharedPtr desired_sub_;
+    std::mutex  desired_mutex_;
+    VelocityCmd desired_cmd_{};
+    bool        have_desired_         = false;
+    std::chrono::steady_clock::time_point last_desired_ts_{};
     rclcpp::Publisher<std_msgs::msg::String>::SharedPtr fusion_pub_;
     rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr cloud_pub_;
     rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr neg_pub_;
@@ -1523,6 +1593,7 @@ private:
             << ",\"min_fwd_m\":" << r.min_forward_distance_m
             << ",\"cliff_layer\":\"" << chain_state_to_str(ultra_chain_state_.load()) << "\""
             << ",\"action\":\"" << action_to_str(r.recommended_action) << "\""
+            << ",\"arbiter\":" << (arbiter_enable_ ? "true" : "false")
             << ",\"astra_w\":" << r.effective_astra_weight
             << ",\"ultra_w\":" << r.effective_ultrasonic_weight
             << ",\"vx\":" << v.linear

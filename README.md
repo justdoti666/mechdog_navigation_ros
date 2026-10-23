@@ -102,6 +102,7 @@ ros2 run mechdog_ultrasonic ultrasonic_node
 | `/cmd_vel` | geometry_msgs/Twist | 订阅 | chassis_bridge_node 消费, 发送到底盘（wheel_board_bridge 或本包 stm32 桥） |
 | `/fusion_result` | std_msgs/String (JSON) | 发布 | 融合结果 JSON（环境/悬崖/前方距离/动作/权重/速度） |
 | `/scan` | sensor_msgs/LaserScan | 订阅 | 雷达（sensor_data QoS, 当前缓存预留, 不参与融合） |
+| `/cmd_vel_nav` | geometry_msgs/Twist | 订阅 | **L0 速度仲裁**：Nav2 期望速度输入（`arbiter_enable:=true` 时才建订阅；`desired_cmd_topic` 可改，默认名待师兄确认拓扑） |
 | `/ultrasonic` | mechdog_ultrasonic/UltrasonicArray | 订阅 | **方案A**: 超声波阵列读数（`ultrasonic_node` 发布; safety_node 订阅后注入算法库, 替代内部 GPIO 直读; 未收到/过期时算法库回退内部读取） |
 | `/camera/depth/image_raw` | sensor_msgs/Image (16UC1) | 订阅 | 深度来源=话题（`depth_source:=topic`，如 Pi 上 Astra 驱动节点）；默认名，`depth_topic` 可改 |
 | `/camera/depth/camera_info` | sensor_msgs/CameraInfo | 订阅 | 深度内参（同来源；`depth_info_topic` 可改） |
@@ -117,6 +118,7 @@ ros2 run mechdog_ultrasonic ultrasonic_node
 ## 对接注意
 
 - **安全闸门**：本包发布 `/unsafe/cmd_vel`，由 `cmd_vel_safety_gate_node` 统一安全检查（estop/超时/限幅）后转发 `/cmd_vel`。若想绕过闸门直发（仅测试）：`--ros-args -p cmd_vel_topic:=/cmd_vel`。
+- **L0 速度仲裁（v2.9.25，默认关）**：`arbiter_enable:=true` 时本包不再自己决定往哪走，而是把 Nav2 的期望速度过一遍安全包络（只减不增 / 不产生动作 / 不引入新阈值）再发到 `/unsafe/cmd_vel`；期望速度 300ms 未更新 ⇒ 零速。接入前须先确认师兄侧 `/cmd_vel` 拓扑（Nav2 直出 vs 闸门输出），再改 `desired_cmd_topic`。
 - **底盘通信**：`chassis_bridge_node` 订阅 `/cmd_vel`。默认 `bridge_type:=simulated`；真机 `bridge_type:=stm32` 时本包直接串口发 21 字节帧（协议同师兄）。**联调默认让 `wheel_board_bridge_node` 管串口，本包保持 simulated**，避免双写。**v2.9.23 (批B B12)**：上游看门狗 —— `/cmd_vel` 静默超 `cmd_vel_timeout_ms`（默认 500ms）⇒ 告警 + 周期性零速兜底帧（防 STM32 永久保持最后指令）。
 - **ROS2 版本**：本包按 Jazzy（Ubuntu 24.04）写法；若环境是 Humble（22.04），代码无需改，仅构建环境不同。
 - **rgb_stream 安全**：`rgb_stream` 是无鉴权调试服务，绑定 `0.0.0.0`，局域网内任何设备都可查看摄像头画面与距离数据。仅限可信局域网调试使用，不要暴露到公网；如需长期运行建议改绑 `127.0.0.1`（改 `main` 中 `addr.sin_addr.s_addr`）或加反向代理鉴权。
@@ -129,7 +131,7 @@ ros2 run mechdog_ultrasonic ultrasonic_node
 - **v2.9.23 修复批（批B 行为项）**：① **N1 门窗口动作层=STOP**（超声 source=topic 首帧未到期间，修复前实测照走 FORWARD 0.06→0.12 m/s；现强制 STOP，且 `/fusion_result`、`/safety/status_text`、5Hz 日志透出 `cliff_layer=waiting_first_frame`）；② **B12 残：chassis_bridge_node 上游看门狗**（`cmd_vel_timeout_ms` 默认 500ms，见上）；③ **N4 运行期参数白名单**（`ros2 param set` 仅白名单即时生效，其余明确拒绝，见「参数一览」注）；④ **B9 跨线程状态原子化/加锁**（超声链路状态、深度新鲜度、相机内参 —— 旧报告两次点名项）。版本 v2.9.22→v2.9.23（两仓同批）。
 - **前向全盲行为（接真机前必读）**：算法库在前向三方向全部失效（镜头被挡 + 三颗前向超声全坏）时输出 `SLOW_FORWARD` 降速盲行（仅 bottom 悬崖兜底），**不是 STOP**。接机械狗前务必与师兄闸门确认该场景有叠加保护；若本层是最后防线，按 mechdog_navigation README「已知限制」#7 把该分支改为 `STOP`。
 
-## 参数一览（safety_node，共 35 个）
+## 参数一览（safety_node，共 38 个）
 
 启动期 `--ros-args -p <名>:=<值>` 均可改；**运行期 `ros2 param set` 仅白名单参数即时生效**（`degraded_policy` / `depth_bad_streak_n` / `depth_timeout_ms` / `ultrasonic_timeout_ms` / `publish_depth_small` / `grid_wedge_only` / `cloud_downsample_step` / `hidden_slow_enable`），其余参数会被**明确拒绝**并在 reason 说明（v2.9.23 批B N4：不再"静默成功但无效"）。标 ★ 的另有 launch 透传（`xxx:=值`）。
 
@@ -160,6 +162,8 @@ ros2 run mechdog_ultrasonic ultrasonic_node
 | | `enable_rgb`★ / `rgb_topic` / `rgb_frame` / `rgb_fps` | false / /mechdog/rgb/image_raw / camera_link / 10 | RGB 回传开关与话题/坐标系/帧率 |
 | | `publish_depth_small`★ | true | 发 `/safety/depth_small`（供汇报窗口；关掉省带宽） |
 | 其它 | `cmd_vel_topic`★ | /unsafe/cmd_vel | 速度指令发布话题（直连 /cmd_vel 仅测试） |
+| 速度仲裁 (L0) | `arbiter_enable`★ | false | **v2.9.25**：true = 外部期望速度（Nav2）→ 安全包络（只减不增 / 不产生动作）→ `cmd_vel_topic`；false = 本节点自行决策（接入前行为逐位一致）。**仅启动期**（不在运行期白名单） |
+| | `desired_cmd_topic` | /cmd_vel_nav | 期望速度输入话题（Nav2 输出；**默认待师兄确认 cmd_vel 拓扑后定**） |
 
 ## 近场点云（P3 起步）
 
